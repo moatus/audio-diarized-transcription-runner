@@ -7,6 +7,10 @@ services:
   audio_diarized_transcription_runner:
     image: ${REGISTRY:-moatus}/audio-diarized-transcription-runner:${TAG:-v0.1.0}
     runtime: nvidia
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
     environment:
       - RUNNER_PORT=8080
       - DEVICE=${NEMO_DEVICE:-cuda}
@@ -19,12 +23,18 @@ services:
       - DEFAULT_VAD_MODEL=${DEFAULT_VAD_MODEL:-vad_multilingual_marblenet}
       - DEFAULT_SPEAKER_MODEL=${DEFAULT_SPEAKER_MODEL:-titanet_large}
       - DEFAULT_ASR_MODEL=${DEFAULT_ASR_MODEL:-stt_en_conformer_ctc_large}
+      - LIVE_FINAL_ASR_MODEL=${LIVE_FINAL_ASR_MODEL:-stt_en_fastconformer_ctc_large}
       - DEFAULT_MAX_SPEAKERS=${DEFAULT_MAX_SPEAKERS:-8}
       - DEFAULT_PRESET=${DEFAULT_PRESET:-meeting}
+      - LIVE_HISTORY_BUFFER_SIZE=${LIVE_HISTORY_BUFFER_SIZE:-256}
+      - LIVE_CURRENT_BUFFER_SIZE=${LIVE_CURRENT_BUFFER_SIZE:-256}
+      - LIVE_SESSION_TTL_SECONDS=${LIVE_SESSION_TTL_SECONDS:-3600}
+      - LIVE_CLOSED_SESSION_TTL_SECONDS=${LIVE_CLOSED_SESSION_TTL_SECONDS:-300}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - audio-diarized-transcription-models:/models
+      - audio-diarized-transcription-nemo-cache:/root/.cache/torch/NeMo
       - audio-diarized-transcription-work:/tmp/audio-diarized-transcription-runner
     ports:
       - "${AUDIO_DIARIZED_TRANSCRIPTION_RUNNER_PORT:-8080}:8080"
@@ -38,5 +48,5 @@ services:
 
 volumes:
   audio-diarized-transcription-models: {}
+  audio-diarized-transcription-nemo-cache: {}
   audio-diarized-transcription-work: {}
-

@@ -28,8 +28,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DEFAULT_VAD_MODEL=vad_multilingual_marblenet \
     DEFAULT_SPEAKER_MODEL=titanet_large \
     DEFAULT_ASR_MODEL=stt_en_conformer_ctc_large \
+    LIVE_FINAL_ASR_MODEL=stt_en_fastconformer_ctc_large \
     DEFAULT_MAX_SPEAKERS=8 \
     DEFAULT_PRESET=meeting \
+    LIVE_SAMPLE_RATE=16000 \
+    LIVE_HISTORY_BUFFER_SIZE=256 \
+    LIVE_CURRENT_BUFFER_SIZE=256 \
+    LIVE_SESSION_TTL_SECONDS=3600 \
+    LIVE_CLOSED_SESSION_TTL_SECONDS=300 \
     SOURCE_URL=https://github.com/moatus/audio-diarized-transcription-runner
 
 RUN apt-get update \
@@ -53,4 +59,3 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')" || exit 1
 
 CMD ["python", "-m", "audio_diarized_transcription_runner"]
-

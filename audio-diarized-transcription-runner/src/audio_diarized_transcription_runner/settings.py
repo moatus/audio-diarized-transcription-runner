@@ -9,6 +9,7 @@ from pathlib import Path
 
 DEFAULT_CAPABILITY_NAME = "audio:diarized-transcription@v0"
 DEFAULT_MODEL_NAME = "nemo-diarized-transcription-meeting-v0"
+DEFAULT_LIVE_FINAL_ASR_MODEL = "stt_en_fastconformer_ctc_large"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "diar_infer_meeting.yaml"
 
 
@@ -46,10 +47,19 @@ class RunnerSettings:
     default_vad_model: str = os.getenv("DEFAULT_VAD_MODEL", "vad_multilingual_marblenet")
     default_speaker_model: str = os.getenv("DEFAULT_SPEAKER_MODEL", "titanet_large")
     default_asr_model: str = os.getenv("DEFAULT_ASR_MODEL", "stt_en_conformer_ctc_large")
+    live_final_asr_model: str = os.getenv(
+        "LIVE_FINAL_ASR_MODEL",
+        DEFAULT_LIVE_FINAL_ASR_MODEL,
+    )
     default_max_speakers: int = _int_env("DEFAULT_MAX_SPEAKERS", 8)
     default_preset: str = os.getenv("DEFAULT_PRESET", "meeting")
     default_model: str = os.getenv("DEFAULT_MODEL", DEFAULT_MODEL_NAME)
     nemo_config_path: Path = _path_env("NEMO_DIARIZER_CONFIG", DEFAULT_CONFIG_PATH)
+    live_sample_rate: int = _int_env("LIVE_SAMPLE_RATE", 16000)
+    live_history_buffer_size: int = _int_env("LIVE_HISTORY_BUFFER_SIZE", 256)
+    live_current_buffer_size: int = _int_env("LIVE_CURRENT_BUFFER_SIZE", 256)
+    live_session_ttl_seconds: int = _int_env("LIVE_SESSION_TTL_SECONDS", 3600)
+    live_closed_session_ttl_seconds: int = _int_env("LIVE_CLOSED_SESSION_TTL_SECONDS", 300)
 
 
 def configure_cache_environment(settings: RunnerSettings) -> None:

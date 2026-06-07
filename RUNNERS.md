@@ -13,6 +13,11 @@ it to 16 kHz mono WAV, and runs NVIDIA NeMo offline diarization-with-ASR.
 | `GET` | `/healthz` | Runtime readiness and CUDA facts |
 | `GET` | `/audio:diarized-transcription@v0/options` | Capability defaults and limits |
 | `POST` | `/v1/audio/diarized-transcriptions` | Multipart diarized transcription request |
+| `POST` | `/v1/audio/diarized-transcriptions/live/sessions` | Create a stateful online diarization session |
+| `POST` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}/audio` | Ingest one audio chunk into a live session |
+| `GET` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}` | Read the latest live diarization snapshot |
+| `POST` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}/finish` | Close a live session, optionally running final offline ASR+diarization |
+| `DELETE` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}` | Close a live session without final transcription |
 | `GET` | `/metrics` | Prometheus text metrics when `METRICS_ENABLED=true` |
 
 ### Request
@@ -50,6 +55,7 @@ returns `507`.
 | `DEFAULT_VAD_MODEL` | `vad_multilingual_marblenet` | NeMo VAD model |
 | `DEFAULT_SPEAKER_MODEL` | `titanet_large` | NeMo speaker embedding model |
 | `DEFAULT_ASR_MODEL` | `stt_en_conformer_ctc_large` | NeMo English ASR model |
+| `LIVE_FINAL_ASR_MODEL` | `stt_en_fastconformer_ctc_large` | NeMo English ASR model used only by live-session final transcription |
 | `DEFAULT_MAX_SPEAKERS` | `8` | Default clustering speaker upper bound |
 | `DEFAULT_PRESET` | `meeting` | Default preset |
 | `NEMO_DIARIZER_CONFIG` | packaged config | Optional override for the NeMo diarization YAML |
@@ -68,3 +74,43 @@ JSON responses include:
 
 `text`, `srt`, and `vtt` response formats return plain text.
 
+### Live Session Path
+
+The live path is additive and keeps one NeMo `OnlineClusteringDiarizer` instance
+per session. Audio chunks are normalized to 16 kHz mono WAV, appended to the
+session timeline, diarized with a rolling audio buffer, and returned as
+cumulative speaker turn events. The default live VAD strategy is an energy VAD
+that feeds absolute speech intervals into NeMo; callers that already have VAD
+can create the session with `vad_strategy=provided` and pass
+`vad_segments_json` on each chunk upload.
+
+Create a session:
+
+```bash
+curl -s http://localhost:8080/v1/audio/diarized-transcriptions/live/sessions \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"live_demo","max_speakers":4,"vad_strategy":"energy"}' | jq
+```
+
+Ingest one chunk:
+
+```bash
+curl -s http://localhost:8080/v1/audio/diarized-transcriptions/live/sessions/live_demo/audio \
+  -F file=@chunk-000.wav \
+  -F sequence_index=0 | jq
+```
+
+Finish without ASR:
+
+```bash
+curl -s http://localhost:8080/v1/audio/diarized-transcriptions/live/sessions/live_demo/finish \
+  -H 'content-type: application/json' \
+  -d '{"run_final_transcription":false}' | jq
+```
+
+Near-live responses currently contain diarization turns only (`text` is empty on
+segments). The pragmatic transcript path is `run_final_transcription=true` on
+finish, which reuses the existing verified offline NeMo ASR+diarization path
+over the accumulated session WAV. Live-session final transcription uses
+`LIVE_FINAL_ASR_MODEL`, which defaults to FastConformer CTC for cleaner meeting
+audio while preserving `DEFAULT_ASR_MODEL` for existing non-live requests.

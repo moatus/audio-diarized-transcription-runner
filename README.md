@@ -14,8 +14,10 @@ Docker image per capability; one process per broker-dispatched container.
 
 The runner exposes `POST /v1/audio/diarized-transcriptions`, accepts multipart
 audio uploads, and returns speaker-labeled transcripts with segments, optional
-word timestamps, subtitle artifacts, and usage. Audio is normalized with
-`ffmpeg`; models and caches live under `MODEL_CACHE_DIR`.
+word timestamps, subtitle artifacts, and usage. It also exposes an additive
+stateful live API under `/v1/audio/diarized-transcriptions/live/sessions` backed
+by NeMo `OnlineClusteringDiarizer`. Audio is normalized with `ffmpeg`; models
+and caches live under `MODEL_CACHE_DIR`.
 
 The Docker image is based on `nvcr.io/nvidia/pytorch:24.07-py3` and installs
 NeMo Toolkit ASR dependencies during build.
@@ -94,6 +96,10 @@ Common env vars:
 - `MAX_QUEUE_SIZE` default `1`
 - `MAX_AUDIO_MB` default `100`
 - `METRICS_ENABLED` default `false`
+- `LIVE_HISTORY_BUFFER_SIZE` default `256`
+- `LIVE_CURRENT_BUFFER_SIZE` default `256`
+- `LIVE_SESSION_TTL_SECONDS` default `3600`
+- `LIVE_CLOSED_SESSION_TTL_SECONDS` default `300`
 
 The default model stack is `vad_multilingual_marblenet`, `titanet_large`, and
 `stt_en_conformer_ctc_large`. The packaged NeMo meeting config can be overridden
@@ -124,4 +130,3 @@ python scripts/audio_diarized_transcription_smoke.py ./sample.wav --require-text
 This repo's runner code is Apache-2.0. The image installs NVIDIA NeMo Toolkit,
 PyTorch, and uses an NVIDIA NGC base image; review those upstream licenses and
 NGC container terms before redistributing images.
-
