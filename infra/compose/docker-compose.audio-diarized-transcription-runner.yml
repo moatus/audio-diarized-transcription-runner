@@ -1,0 +1,42 @@
+# Run-only compose for audio-diarized-transcription-runner. Build via
+# `./build-images.sh build audio-diarized-transcription-runner`.
+#
+# NeMo, Hugging Face, and torch model caches resolve from the models volume.
+
+services:
+  audio_diarized_transcription_runner:
+    image: ${REGISTRY:-moatus}/audio-diarized-transcription-runner:${TAG:-v0.1.0}
+    runtime: nvidia
+    environment:
+      - RUNNER_PORT=8080
+      - DEVICE=${NEMO_DEVICE:-cuda}
+      - CAPABILITY_NAME=audio:diarized-transcription@v0
+      - METRICS_ENABLED=${NEMO_METRICS_ENABLED:-false}
+      - MAX_QUEUE_SIZE=${NEMO_MAX_QUEUE_SIZE:-1}
+      - MAX_AUDIO_MB=${NEMO_MAX_AUDIO_MB:-100}
+      - MODEL_CACHE_DIR=/models
+      - WORK_DIR=/tmp/audio-diarized-transcription-runner
+      - DEFAULT_VAD_MODEL=${DEFAULT_VAD_MODEL:-vad_multilingual_marblenet}
+      - DEFAULT_SPEAKER_MODEL=${DEFAULT_SPEAKER_MODEL:-titanet_large}
+      - DEFAULT_ASR_MODEL=${DEFAULT_ASR_MODEL:-stt_en_conformer_ctc_large}
+      - DEFAULT_MAX_SPEAKERS=${DEFAULT_MAX_SPEAKERS:-8}
+      - DEFAULT_PRESET=${DEFAULT_PRESET:-meeting}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - audio-diarized-transcription-models:/models
+      - audio-diarized-transcription-work:/tmp/audio-diarized-transcription-runner
+    ports:
+      - "${AUDIO_DIARIZED_TRANSCRIPTION_RUNNER_PORT:-8080}:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  audio-diarized-transcription-models: {}
+  audio-diarized-transcription-work: {}
+

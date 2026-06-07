@@ -1,0 +1,31 @@
+capability: audio:diarized-transcription@v0
+description: |
+  Audio diarized transcription runner. Accepts multipart audio upload,
+  normalizes the input to 16 kHz mono WAV, runs NVIDIA NeMo offline
+  diarization-with-ASR, and returns speaker-labeled text, speaker segments,
+  optional word timestamps, subtitle artifacts, and usage.
+
+offerings:
+  - name: diarized-audio-transcription
+    description: Transcribe uploaded audio and label speaker turns
+    methods:
+      - POST /v1/audio/diarized-transcriptions
+      - GET /audio:diarized-transcription@v0/options
+    input: audio
+    rate_card_hints:
+      unit: audio_seconds
+
+models:
+  - id: nemo-diarized-transcription-meeting-v0
+    family: NVIDIA NeMo
+    notes: Meeting preset using VAD, speaker embeddings, clustering, and English ASR.
+  - id: vad_multilingual_marblenet
+    family: NVIDIA NeMo VAD
+    notes: Default voice activity detector.
+  - id: titanet_large
+    family: NVIDIA NeMo speaker embeddings
+    notes: Default speaker embedding model.
+  - id: stt_en_conformer_ctc_large
+    family: NVIDIA NeMo ASR
+    notes: Default English ASR model.
+

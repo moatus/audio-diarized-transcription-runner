@@ -1,0 +1,9 @@
+audio-diarized-transcription-runner
+
+This product includes software developed for the Livepeer module runner
+workspace.
+
+The runner integrates with NVIDIA NeMo Toolkit and PyTorch. Those dependencies
+are installed from their upstream packages/images at build time and remain
+subject to their own licenses and distribution terms.
+
