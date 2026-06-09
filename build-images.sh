@@ -11,7 +11,7 @@
 # Environment:
 #   REGISTRY       Registry prefix for runner images (default: moatus).
 #   TAG            Image tag (default: v0.1.0).
-#   BASE_IMAGE     CUDA/PyTorch base image (default: nvcr.io/nvidia/pytorch:24.07-py3).
+#   BASE_IMAGE     CUDA/PyTorch base image (default: nvcr.io/nvidia/pytorch:25.09-py3).
 
 set -euo pipefail
 
@@ -20,7 +20,7 @@ cd "$ROOT"
 
 REGISTRY="${REGISTRY:-moatus}"
 TAG="${TAG:-v0.1.0}"
-BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/pytorch:24.07-py3}"
+BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.09-py3}"
 
 ALL_IMAGES=(
   audio-diarized-transcription-runner
@@ -108,4 +108,3 @@ case "${cmd}" in
   help|-h|--help) cmd_help ;;
   *) echo "unknown subcommand: ${cmd}" >&2; cmd_help; exit 2 ;;
 esac
-

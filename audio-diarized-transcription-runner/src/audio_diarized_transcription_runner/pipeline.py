@@ -175,9 +175,26 @@ def _run_nemo_pipeline(
     num_speakers: Optional[int],
     max_speakers: int,
 ) -> Dict[str, Any]:
+    cfg = _build_diarizer_config(
+        manifest_path=manifest_path,
+        output_dir=output_dir,
+        settings=settings,
+        num_speakers=num_speakers,
+        max_speakers=max_speakers,
+    )
+    if _uses_native_parakeet_timestamps(settings.default_asr_model):
+        return _run_native_timestamp_parakeet_pipeline(cfg, settings)
+    return _run_legacy_nemo_timestamp_pipeline(cfg)
+
+
+def _build_diarizer_config(
+    manifest_path: Path,
+    output_dir: Path,
+    settings: RunnerSettings,
+    num_speakers: Optional[int],
+    max_speakers: int,
+) -> Any:
     from omegaconf import OmegaConf
-    from nemo.collections.asr.parts.utils.decoder_timestamps_utils import ASRDecoderTimeStamps
-    from nemo.collections.asr.parts.utils.diarization_utils import OfflineDiarWithASR
 
     cfg = OmegaConf.load(settings.nemo_config_path)
     cfg.device = settings.device
@@ -187,8 +204,15 @@ def _run_nemo_pipeline(
     cfg.diarizer.speaker_embeddings.model_path = settings.default_speaker_model
     cfg.diarizer.speaker_embeddings.parameters.save_embeddings = False
     cfg.diarizer.asr.model_path = settings.default_asr_model
+    cfg.diarizer.asr.parameters.asr_batch_size = settings.live_final_asr_batch_size
     cfg.diarizer.clustering.parameters.max_num_speakers = int(max_speakers)
     cfg.diarizer.clustering.parameters.oracle_num_speakers = num_speakers is not None
+    return cfg
+
+
+def _run_legacy_nemo_timestamp_pipeline(cfg: Any) -> Dict[str, Any]:
+    from nemo.collections.asr.parts.utils.decoder_timestamps_utils import ASRDecoderTimeStamps
+    from nemo.collections.asr.parts.utils.diarization_utils import OfflineDiarWithASR
 
     asr_decoder_ts = ASRDecoderTimeStamps(cfg.diarizer)
     asr_model = asr_decoder_ts.set_asr_model()
@@ -203,6 +227,230 @@ def _run_nemo_pipeline(
     if not trans_info_dict:
         raise RuntimeError("NeMo produced no diarized transcription output")
     return next(iter(trans_info_dict.values()))
+
+
+def _run_native_timestamp_parakeet_pipeline(cfg: Any, settings: RunnerSettings) -> Dict[str, Any]:
+    from nemo.collections.asr.parts.utils.diarization_utils import OfflineDiarWithASR
+    from nemo.collections.asr.parts.utils.speaker_utils import audio_rttm_map
+
+    audio_map = audio_rttm_map(str(cfg.diarizer.manifest_filepath))
+    if not audio_map:
+        raise RuntimeError("No audio entries found in diarization manifest")
+
+    asr_model = _load_native_timestamp_asr_model(
+        settings.default_asr_model,
+        settings.device,
+        settings=settings,
+    )
+    word_hyp, word_ts_hyp = _run_native_timestamp_asr(
+        asr_model=asr_model,
+        audio_map=audio_map,
+        batch_size=_native_asr_batch_size(cfg),
+    )
+    if not any(words for words in word_hyp.values()):
+        return {"sentences": [], "words": []}
+
+    asr_diar_offline = OfflineDiarWithASR(cfg.diarizer)
+    asr_diar_offline.word_ts_anchor_offset = _if_none_get_default(
+        _config_get(cfg.diarizer.asr.parameters, "word_ts_anchor_offset"),
+        0.0,
+    )
+    diar_hyp, _ = asr_diar_offline.run_diarization(cfg, word_ts_hyp)
+    trans_info_dict = asr_diar_offline.get_transcript_with_speaker_labels(
+        diar_hyp, word_hyp, word_ts_hyp
+    )
+    if not trans_info_dict:
+        raise RuntimeError("NeMo produced no diarized transcription output")
+    return next(iter(trans_info_dict.values()))
+
+
+def _load_native_timestamp_asr_model(
+    model_name: str,
+    device: str,
+    *,
+    settings: RunnerSettings,
+) -> Any:
+    from nemo.collections.asr.models import ASRModel
+
+    if model_name.endswith(".nemo"):
+        asr_model = ASRModel.restore_from(restore_path=model_name)
+    else:
+        asr_model = ASRModel.from_pretrained(model_name)
+
+    _configure_native_timestamp_asr_decoding(asr_model, settings)
+    if str(device).startswith("cuda"):
+        asr_model = asr_model.cuda()
+    elif hasattr(asr_model, "to"):
+        asr_model = asr_model.to(device)
+    asr_model.eval()
+    return asr_model
+
+
+def _configure_native_timestamp_asr_decoding(asr_model: Any, settings: RunnerSettings) -> None:
+    strategy = str(settings.live_final_asr_decoding_strategy or "").strip()
+    beam_size = settings.live_final_asr_beam_size
+    if not strategy and beam_size is None:
+        return
+    decoding_cfg = getattr(getattr(asr_model, "cfg", None), "decoding", None)
+    if decoding_cfg is None or not hasattr(asr_model, "change_decoding_strategy"):
+        return
+
+    from omegaconf import open_dict
+
+    with open_dict(decoding_cfg):
+        if strategy:
+            decoding_cfg.strategy = strategy
+        if beam_size is not None:
+            if not hasattr(decoding_cfg, "beam"):
+                decoding_cfg.beam = {}
+            decoding_cfg.beam.beam_size = int(beam_size)
+        decoding_cfg.compute_timestamps = True
+        decoding_cfg.preserve_alignments = True
+    asr_model.change_decoding_strategy(decoding_cfg)
+
+
+def _run_native_timestamp_asr(
+    asr_model: Any,
+    audio_map: Dict[str, Dict[str, Any]],
+    batch_size: int,
+) -> tuple[Dict[str, List[str]], Dict[str, List[List[float]]]]:
+    audio_paths = [str(meta["audio_filepath"]) for meta in audio_map.values()]
+    hypotheses = _unwrap_transcribe_result(
+        asr_model.transcribe(
+            audio_paths,
+            batch_size=batch_size,
+            timestamps=True,
+        )
+    )
+    if len(hypotheses) != len(audio_paths):
+        raise RuntimeError(
+            f"Parakeet returned {len(hypotheses)} hypotheses for {len(audio_paths)} audio files"
+        )
+
+    word_hyp: Dict[str, List[str]] = {}
+    word_ts_hyp: Dict[str, List[List[float]]] = {}
+    for uniq_id, hypothesis in zip(audio_map.keys(), hypotheses):
+        words, timestamps = _extract_native_timestamp_words(hypothesis)
+        word_hyp[uniq_id] = words
+        word_ts_hyp[uniq_id] = timestamps
+    return word_hyp, word_ts_hyp
+
+
+def _unwrap_transcribe_result(result: Any) -> List[Any]:
+    if isinstance(result, tuple):
+        result = result[0]
+    if not isinstance(result, list):
+        return [result]
+    return result
+
+
+def _extract_native_timestamp_words(hypothesis: Any) -> tuple[List[str], List[List[float]]]:
+    timestamp = _hypothesis_field(hypothesis, "timestamp")
+    if not isinstance(timestamp, dict):
+        timestamp = _hypothesis_field(hypothesis, "timestep")
+    if not isinstance(timestamp, dict):
+        raise RuntimeError("Parakeet native timestamp output did not include a timestamp dictionary")
+
+    fallback_words = str(_hypothesis_field(hypothesis, "text") or "").split()
+    word_entries = timestamp.get("word")
+    if not word_entries:
+        if not fallback_words:
+            return [], []
+        return _approximate_word_timestamps_from_segments(
+            words=fallback_words,
+            segment_entries=timestamp.get("segment") or [],
+        )
+
+    words: List[str] = []
+    timestamps: List[List[float]] = []
+    for index, entry in enumerate(word_entries):
+        word = _timestamp_entry_get(entry, "word")
+        if word is None and index < len(fallback_words):
+            word = fallback_words[index]
+        start = _timestamp_entry_seconds(entry, ("start", "start_time"))
+        end = _timestamp_entry_seconds(entry, ("end", "end_time"))
+        if word is None or start is None or end is None:
+            raise RuntimeError(f"Unsupported Parakeet word timestamp entry: {entry!r}")
+
+        word_text = str(word).strip()
+        if word_text:
+            words.append(word_text)
+            timestamps.append([round(float(start), 3), round(float(end), 3)])
+
+    if not words or len(words) != len(timestamps):
+        raise RuntimeError("Parakeet native word and timestamp counts did not match")
+    return words, timestamps
+
+
+def _approximate_word_timestamps_from_segments(
+    *,
+    words: List[str],
+    segment_entries: List[Any],
+) -> tuple[List[str], List[List[float]]]:
+    if not segment_entries:
+        raise RuntimeError("Parakeet native timestamp output did not include word timestamps")
+
+    segment_start = _timestamp_entry_seconds(segment_entries[0], ("start", "start_time"))
+    segment_end = _timestamp_entry_seconds(segment_entries[-1], ("end", "end_time"))
+    if segment_start is None or segment_end is None or segment_end <= segment_start:
+        raise RuntimeError("Parakeet native segment timestamps could not be mapped to words")
+
+    duration = float(segment_end) - float(segment_start)
+    step = duration / max(len(words), 1)
+    timestamps = [
+        [round(float(segment_start) + (index * step), 3), round(float(segment_start) + ((index + 1) * step), 3)]
+        for index in range(len(words))
+    ]
+    return words, timestamps
+
+
+def _timestamp_entry_get(entry: Any, key: str, default: Any = None) -> Any:
+    if isinstance(entry, dict):
+        return entry.get(key, default)
+    return getattr(entry, key, default)
+
+
+def _timestamp_entry_seconds(entry: Any, keys: tuple[str, ...]) -> Optional[float]:
+    for key in keys:
+        value = _timestamp_entry_get(entry, key)
+        if value is not None:
+            return float(value)
+    return None
+
+
+def _hypothesis_field(hypothesis: Any, key: str, default: Any = None) -> Any:
+    if isinstance(hypothesis, dict):
+        return hypothesis.get(key, default)
+    return getattr(hypothesis, key, default)
+
+
+def _native_asr_batch_size(cfg: Any) -> int:
+    return int(_if_none_get_default(_config_get(cfg.diarizer.asr.parameters, "asr_batch_size"), 4))
+
+
+def _uses_native_parakeet_timestamps(model_name: str) -> bool:
+    normalized = model_name.lower().replace("_", "-")
+    return any(
+        marker in normalized
+        for marker in (
+            "parakeet-tdt",
+            "parakeet-rnnt",
+            "parakeet-transducer",
+        )
+    )
+
+
+def _if_none_get_default(value: Any, default: Any) -> Any:
+    return default if value is None else value
+
+
+def _config_get(config: Any, key: str, default: Any = None) -> Any:
+    if hasattr(config, "get"):
+        return config.get(key, default)
+    try:
+        return config[key]
+    except (KeyError, TypeError):
+        return default
 
 
 def _safe_stem(filename: str) -> str:

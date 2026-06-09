@@ -6,10 +6,11 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from starlette.websockets import WebSocketDisconnect
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -28,10 +29,15 @@ from .pipeline import (
     run_diarized_transcription,
 )
 from .settings import RunnerSettings
+from .streaming import (
+    TrueStreamingSessionConfig,
+    TrueStreamingSessionManager,
+)
 
 
 settings = RunnerSettings()
 live_sessions = LiveDiarizationSessionManager(settings=settings)
+true_streaming_sessions = TrueStreamingSessionManager(settings=settings)
 startup_error: Optional[str] = None
 runtime_facts = {"cuda_available": False}
 metrics = {
@@ -42,6 +48,8 @@ metrics = {
     "live_sessions_total": 0,
     "live_audio_chunks_total": 0,
     "live_sessions_finished_total": 0,
+    "true_streaming_sessions_total": 0,
+    "true_streaming_audio_frames_total": 0,
 }
 _queue_lock = asyncio.Lock()
 _inflight = 0
@@ -117,12 +125,38 @@ def healthz() -> JSONResponse:
 def options() -> dict:
     return {
         "capability": settings.capability_name,
-        "modes": ["local-direct", "http-multipart@v0"],
+        "modes": ["openai-audio-transcriptions@v1", "local-direct", "http-multipart@v0"],
         "live_modes": ["sessioned-online-diarization@v0"],
+        "streaming_modes": ["websocket-pcm16-true-streaming@v0"],
+        "endpoints": {
+            "bounded_transcriptions": "POST /v1/audio/transcriptions",
+            "openai_compatible": "POST /v1/audio/transcriptions",
+            "native": "POST /v1/audio/diarized-transcriptions",
+            "options": "GET /audio:diarized-transcription@v0/options",
+            "live_sessions": "POST /v1/audio/diarized-transcriptions/live/sessions",
+            "true_streaming": "WS /v1/audio/transcriptions/stream",
+            "legacy_true_streaming": "WS /v1/audio/diarized-transcriptions/stream",
+        },
         "models": [settings.default_model],
         "languages": ["en"],
         "presets": [settings.default_preset],
         "response_formats": ["json", "text", "srt", "vtt"],
+        "openai_compatible": {
+            "endpoint": "POST /v1/audio/transcriptions",
+            "native_capability": settings.capability_name,
+            "additive": True,
+            "response_formats": ["json", "verbose_json", "text", "srt", "vtt"],
+            "timestamp_granularities": ["segment", "word"],
+            "feature_flags": ["diarization", "include_diarization"],
+            "extension_fields": [
+                "diarization",
+                "speaker_labeled_text",
+                "usage",
+                "models",
+                "artifacts",
+                "speaker",
+            ],
+        },
         "defaults": {
             "model": settings.default_model,
             "language": "en",
@@ -141,7 +175,10 @@ def options() -> dict:
             "vad": settings.default_vad_model,
             "speaker_embeddings": settings.default_speaker_model,
             "asr": settings.default_asr_model,
+            "live_provisional_asr": settings.live_provisional_asr_model,
             "live_final_asr": settings.live_final_asr_model,
+            "true_streaming_asr": settings.true_streaming_asr_model,
+            "true_streaming_diarization": settings.true_streaming_diar_model,
         },
         "live": {
             "endpoints": {
@@ -153,7 +190,29 @@ def options() -> dict:
             },
             "vad_strategies": ["energy", "provided"],
             "sample_rate": settings.live_sample_rate,
-            "asr_strategy": "final-offline-transcription-on-finish",
+            "asr_strategy": "provisional-chunk-asr-during-ingest-with-final-offline-transcription-on-finish",
+        },
+        "true_streaming": {
+            "endpoint": "WS /v1/audio/transcriptions/stream",
+            "legacy_endpoint": "WS /v1/audio/diarized-transcriptions/stream",
+            "transport": "persistent WebSocket",
+            "input_audio": "binary frames containing little-endian 16 kHz mono int16 PCM",
+            "control_messages": [
+                {"type": "finish"},
+                {"type": "ping"},
+            ],
+            "engine": settings.true_streaming_engine,
+            "enabled": settings.true_streaming_enabled,
+            "sample_rate": settings.true_streaming_sample_rate,
+            "asr_model": settings.true_streaming_asr_model,
+            "diarization_model": settings.true_streaming_diar_model,
+            "asr_chunk_seconds": settings.true_streaming_asr_chunk_seconds,
+            "asr_greedy_max_symbols": settings.true_streaming_asr_greedy_max_symbols,
+            "asr_eou_tokens": list(settings.true_streaming_asr_eou_tokens),
+            "asr_stabilize_partials": settings.true_streaming_asr_stabilize_partials,
+            "asr_emit_min_words": settings.true_streaming_asr_emit_min_words,
+            "asr_emit_min_chars": settings.true_streaming_asr_emit_min_chars,
+            "asr_emit_max_hold_seconds": settings.true_streaming_asr_emit_max_hold_seconds,
         },
     }
 
@@ -188,8 +247,71 @@ def metrics_endpoint() -> Response:
             "livepeer_audio_diarized_transcription_live_sessions_finished_total "
             f"{metrics['live_sessions_finished_total']}"
         ),
+        (
+            "livepeer_audio_diarized_transcription_true_streaming_sessions_total "
+            f"{metrics['true_streaming_sessions_total']}"
+        ),
+        (
+            "livepeer_audio_diarized_transcription_true_streaming_audio_frames_total "
+            f"{metrics['true_streaming_audio_frames_total']}"
+        ),
     ]
     return PlainTextResponse("\n".join(lines) + "\n")
+
+
+@app.websocket("/v1/audio/transcriptions/stream")
+@app.websocket("/v1/audio/diarized-transcriptions/stream")
+async def true_streaming_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    if startup_error:
+        await websocket.send_json(
+            {"error": {"message": startup_error, "type": "server_error"}}
+        )
+        await websocket.close(code=1011)
+        return
+
+    session = None
+    try:
+        config = _streaming_config_from_query(websocket)
+        session = await run_in_threadpool(true_streaming_sessions.create_session, config)
+        metrics["true_streaming_sessions_total"] += 1
+        await websocket.send_json(session.snapshot())
+        while True:
+            message = await websocket.receive()
+            if "bytes" in message and message["bytes"] is not None:
+                events = await run_in_threadpool(session.process_audio, message["bytes"])
+                metrics["true_streaming_audio_frames_total"] += 1
+                for event in events:
+                    await websocket.send_json(event)
+                continue
+            if "text" in message and message["text"] is not None:
+                should_close = await _handle_streaming_control_message(
+                    websocket,
+                    session,
+                    message["text"],
+                )
+                if should_close:
+                    return
+    except WebSocketDisconnect:
+        pass
+    except UnsupportedParameterError as error:
+        await websocket.send_json({"error": {"message": str(error), "type": error.error_type}})
+        await websocket.close(code=1008)
+    except RunnerInputError as error:
+        await websocket.send_json({"error": {"message": str(error), "type": error.error_type}})
+        await websocket.close(code=1003)
+    except Exception as error:
+        await websocket.send_json({"error": {"message": str(error), "type": "server_error"}})
+        await websocket.close(code=1011)
+    finally:
+        if session is not None:
+            try:
+                if not session.closed:
+                    await run_in_threadpool(session.finish)
+            except Exception:
+                pass
+            finally:
+                await run_in_threadpool(true_streaming_sessions.release_session, session)
 
 
 @app.post("/v1/audio/diarized-transcriptions")
@@ -249,6 +371,96 @@ async def diarized_transcriptions(
             path = Path(result["artifacts"].get(artifact_key, ""))
             return PlainTextResponse(path.read_text(encoding="utf-8"), headers=headers)
         return JSONResponse(result, headers=headers)
+    except CudaOutOfMemoryError as error:
+        _record_failure()
+        return _error_response(str(error), 507, "cuda_out_of_memory")
+    except UnsupportedParameterError as error:
+        _record_failure()
+        return _error_response(str(error), error.status_code, error.error_type)
+    except RunnerInputError as error:
+        _record_failure()
+        return _error_response(str(error), error.status_code, error.error_type)
+    except Exception as error:
+        _record_failure()
+        return _error_response(str(error), 500, "server_error")
+    finally:
+        await _release_slot()
+        if uploaded_path and uploaded_path.exists():
+            uploaded_path.unlink(missing_ok=True)
+
+
+@app.post("/v1/audio/transcriptions")
+async def openai_audio_transcriptions(
+    request: Request,
+    file: UploadFile = File(...),
+    model: str = Form(settings.default_model),
+    language: str = Form("en"),
+    response_format: str = Form("json"),
+    prompt: Optional[str] = Form(None),
+    temperature: Optional[float] = Form(None),
+    preset: str = Form(settings.default_preset),
+    num_speakers: Optional[int] = Form(None),
+    max_speakers: int = Form(settings.default_max_speakers),
+    include_words: bool = Form(False),
+    include_artifacts: bool = Form(False),
+    diarization: Optional[bool] = Form(None),
+    include_diarization: Optional[bool] = Form(None),
+) -> Response:
+    del prompt, temperature
+    if startup_error:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"message": startup_error, "type": "server_error"}},
+        )
+    try:
+        timestamp_granularities = await _openai_timestamp_granularities(request)
+    except UnsupportedParameterError as error:
+        return _error_response(str(error), error.status_code, error.error_type)
+    if response_format == "verbose_json" and "word" in timestamp_granularities:
+        include_words = True
+    diarization_enabled = bool(
+        diarization if diarization is not None else include_diarization
+    )
+
+    acquired = await _try_acquire_slot()
+    if not acquired:
+        raise HTTPException(
+            status_code=429,
+            detail={"error": {"message": "runner queue full", "type": "queue_full"}},
+        )
+
+    uploaded_path: Optional[Path] = None
+    try:
+        uploaded_path = await _persist_upload(file)
+        request_model = DiarizationRequest(
+            audio_path=uploaded_path,
+            filename=file.filename or "audio",
+            content_type=file.content_type,
+            model=model,
+            language=language,
+            preset=preset,
+            num_speakers=num_speakers,
+            max_speakers=max_speakers,
+            response_format="json" if response_format == "verbose_json" else response_format,
+            include_words=include_words,
+            include_artifacts=include_artifacts,
+        )
+        started = time.monotonic()
+        result = await run_in_threadpool(run_diarized_transcription, request_model, settings)
+        elapsed = time.monotonic() - started
+        work_units = int(result["usage"]["work_units"])
+        _record_success(result["duration_seconds"], work_units)
+        headers = {
+            "X-Livepeer-Work-Units": str(work_units),
+            "X-Livepeer-Runner-Elapsed-Seconds": f"{elapsed:.3f}",
+        }
+        return _openai_transcription_response(
+            result=result,
+            response_format=response_format,
+            timestamp_granularities=timestamp_granularities,
+            include_diarization=diarization_enabled,
+            headers=headers,
+        )
     except CudaOutOfMemoryError as error:
         _record_failure()
         return _error_response(str(error), 507, "cuda_out_of_memory")
@@ -456,6 +668,233 @@ def _parse_vad_segments(value: Optional[str]) -> Optional[List[Dict[str, float]]
             raise RunnerInputError("each VAD segment must contain start and end")
         segments.append({"start": float(item["start"]), "end": float(item["end"])})
     return segments
+
+
+def _streaming_config_from_query(websocket: WebSocket) -> TrueStreamingSessionConfig:
+    query = websocket.query_params
+    max_speakers = _streaming_int_query_param(query, "max_speakers", 4)
+    return TrueStreamingSessionConfig(
+        session_id=query.get("session_id") or TrueStreamingSessionConfig().session_id,
+        language=query.get("language", "en"),
+        preset=query.get("preset", settings.default_preset),
+        max_speakers=max_speakers,
+        sample_rate=_streaming_int_query_param(
+            query,
+            "sample_rate",
+            settings.true_streaming_sample_rate,
+        ),
+    )
+
+
+def _streaming_int_query_param(query: Any, name: str, default: int) -> int:
+    raw_value = query.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError as error:
+        raise UnsupportedParameterError(f"{name} must be an integer") from error
+
+
+async def _handle_streaming_control_message(
+    websocket: WebSocket,
+    session: Any,
+    message: str,
+) -> bool:
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        await websocket.send_json(
+            {"error": {"message": "stream control messages must be JSON", "type": "invalid_request_error"}}
+        )
+        return False
+    message_type = str(payload.get("type") or payload.get("event_type") or "").strip()
+    if message_type == "ping":
+        await websocket.send_json({"event_type": "pong", "session_id": session.session_id})
+        return False
+    if message_type in {"finish", "session.finish", "transcript.session.finish"}:
+        finish_events = await run_in_threadpool(session.finish_events)
+        for event in finish_events:
+            await websocket.send_json(event)
+        await websocket.close(code=1000)
+        return True
+    await websocket.send_json(
+        {
+            "error": {
+                "message": f"unsupported stream control message type: {message_type or '<empty>'}",
+                "type": "invalid_request_error",
+            }
+        }
+    )
+    return False
+
+
+async def _openai_timestamp_granularities(request: Request) -> List[str]:
+    form = await request.form()
+    values: List[str] = []
+    for key in ("timestamp_granularities[]", "timestamp_granularities"):
+        for value in form.getlist(key):
+            if value is None:
+                continue
+            for item in str(value).split(","):
+                normalized = item.strip().lower()
+                if normalized:
+                    values.append(normalized)
+    allowed = {"segment", "word"}
+    unsupported = sorted(set(values) - allowed)
+    if unsupported:
+        raise UnsupportedParameterError(
+            f"timestamp_granularities must contain only {sorted(allowed)}"
+        )
+    if not values:
+        return ["segment"]
+    deduped: List[str] = []
+    for value in values:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _openai_transcription_response(
+    *,
+    result: Dict[str, Any],
+    response_format: str,
+    timestamp_granularities: List[str],
+    include_diarization: bool,
+    headers: Dict[str, str],
+) -> Response:
+    if response_format == "text":
+        return PlainTextResponse(_openai_plain_text(result), headers=headers)
+    if response_format in {"srt", "vtt"}:
+        artifact_key = f"{response_format}_path"
+        path = Path(result.get("artifacts", {}).get(artifact_key, ""))
+        return PlainTextResponse(path.read_text(encoding="utf-8"), headers=headers)
+    if response_format == "json":
+        return JSONResponse({"text": _openai_plain_text(result)}, headers=headers)
+    if response_format == "verbose_json":
+        return JSONResponse(
+            _openai_verbose_json(
+                result,
+                timestamp_granularities=timestamp_granularities,
+                include_diarization=include_diarization,
+            ),
+            headers=headers,
+        )
+    raise UnsupportedParameterError(
+        "response_format must be one of ['json', 'text', 'srt', 'vtt', 'verbose_json']"
+    )
+
+
+def _openai_verbose_json(
+    result: Dict[str, Any],
+    *,
+    timestamp_granularities: List[str],
+    include_diarization: bool,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "task": "transcribe",
+        "language": "english",
+        "duration": result.get("duration_seconds", 0.0),
+        "text": _openai_plain_text(result),
+    }
+    if "segment" in timestamp_granularities:
+        payload["segments"] = _openai_segments(
+            result.get("segments") or [],
+            include_speaker=include_diarization,
+        )
+    if "word" in timestamp_granularities:
+        payload["words"] = _openai_words(
+            result.get("words") or [],
+            include_speaker=include_diarization,
+        )
+    if include_diarization:
+        payload.update(_openai_generic_extensions(result))
+    return payload
+
+
+def _openai_plain_text(result: Dict[str, Any]) -> str:
+    segments = result.get("segments") or []
+    if isinstance(segments, list):
+        pieces = [
+            str(segment.get("text") or "").strip()
+            for segment in segments
+            if isinstance(segment, dict) and str(segment.get("text") or "").strip()
+        ]
+        if pieces:
+            return " ".join(pieces)
+    return str(result.get("text") or "").strip()
+
+
+def _openai_segments(
+    segments: List[Dict[str, Any]],
+    *,
+    include_speaker: bool,
+) -> List[Dict[str, Any]]:
+    openai_segments: List[Dict[str, Any]] = []
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            continue
+        payload: Dict[str, Any] = {
+            "id": index,
+            "seek": 0,
+            "start": _openai_seconds(segment.get("start", 0.0)),
+            "end": _openai_seconds(segment.get("end", 0.0)),
+            "text": str(segment.get("text") or ""),
+            "tokens": [],
+            "temperature": 0.0,
+            "avg_logprob": 0.0,
+            "compression_ratio": 0.0,
+            "no_speech_prob": 0.0,
+        }
+        if include_speaker:
+            payload["speaker"] = segment.get("speaker")
+        openai_segments.append(payload)
+    return openai_segments
+
+
+def _openai_words(
+    words: List[Dict[str, Any]],
+    *,
+    include_speaker: bool,
+) -> List[Dict[str, Any]]:
+    openai_words: List[Dict[str, Any]] = []
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        payload: Dict[str, Any] = {
+            "word": str(word.get("word") or ""),
+            "start": _openai_seconds(word.get("start", 0.0)),
+            "end": _openai_seconds(word.get("end", 0.0)),
+        }
+        if include_speaker:
+            payload["speaker"] = word.get("speaker")
+        openai_words.append(payload)
+    return openai_words
+
+
+def _openai_generic_extensions(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "transcription_id": result.get("id"),
+        "capability": result.get("capability"),
+        "mode": result.get("mode"),
+        "models": result.get("models") or {},
+        "usage": result.get("usage") or {},
+        "speaker_labeled_text": str(result.get("text") or ""),
+        "diarization": {
+            "speaker_count": int(result.get("speaker_count") or 0),
+            "speakers": result.get("speakers") or [],
+            "segments": result.get("segments") or [],
+            "words": result.get("words") or [],
+        },
+        "artifacts": result.get("artifacts") or {},
+    }
+
+
+def _openai_seconds(value: Any) -> float:
+    try:
+        return round(float(value), 3)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _error_response(message: str, status_code: int, error_type: str) -> JSONResponse:

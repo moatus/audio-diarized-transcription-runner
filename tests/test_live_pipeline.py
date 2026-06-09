@@ -47,6 +47,31 @@ class FailingSecondStepDiarizer(FakeOnlineDiarizer):
         return super().diarize_step(audio_buffer, vad_timestamps)
 
 
+class FakeProvisionalASR:
+    def __init__(self):
+        self.calls = []
+
+    def transcribe(self, audio_paths, batch_size=1, timestamps=False):
+        self.calls.append(
+            {
+                "audio_paths": audio_paths,
+                "batch_size": batch_size,
+                "timestamps": timestamps,
+            }
+        )
+        return [
+            {
+                "text": "hello world",
+                "timestamp": {
+                    "word": [
+                        {"word": "hello", "start": 0.1, "end": 0.3},
+                        {"word": "world", "start": 0.45, "end": 0.7},
+                    ]
+                },
+            }
+        ]
+
+
 def _as_pairs(value):
     if hasattr(value, "tolist"):
         value = value.tolist()
@@ -82,8 +107,15 @@ def test_live_session_ingests_chunks_and_keeps_online_state(monkeypatch, tmp_pat
         return [0.05] * 16000, 1.0
 
     monkeypatch.setattr("audio_diarized_transcription_runner.live._decode_audio_to_samples", fake_decode)
-    settings = RunnerSettings(work_dir=tmp_path)
-    manager = LiveDiarizationSessionManager(settings=settings, diarizer_factory=factory)
+    settings = RunnerSettings(
+        work_dir=tmp_path,
+        live_provisional_asr_model="fake-live-asr",
+    )
+    manager = LiveDiarizationSessionManager(
+        settings=settings,
+        diarizer_factory=factory,
+        provisional_asr_factory=lambda model_name, device: FakeProvisionalASR(),
+    )
 
     started = manager.create_session(
         LiveSessionConfig(
@@ -115,23 +147,37 @@ def test_live_session_ingests_chunks_and_keeps_online_state(monkeypatch, tmp_pat
     assert started["event_type"] == "session.started"
     assert first["chunk"]["start"] == 0.0
     assert first["chunk"]["end"] == 1.0
+    assert first["chunk"]["text"] == "hello world"
+    assert first["chunk"]["text_status"] == "available"
+    assert first["transcript_events"][0]["event_type"] == "transcript.chunk_ingested"
+    assert first["transcript_events"][0]["text"] == "hello world"
+    assert first["transcript_events"][0]["text_status"] == "available"
+    assert first["transcript_events"][1]["event_type"] == "transcript.segment"
+    assert first["transcript_events"][1]["speaker"] == "speaker_0"
+    assert first["transcript_events"][1]["text"] == "hello world"
+    assert first["transcript_events"][1]["is_provisional"] is True
+    assert first["transcript_jsonl_path"].endswith("transcript-events.jsonl")
     assert first["segments"] == [
-        {"speaker": "speaker_0", "start": 0.1, "end": 0.8, "text": ""}
+        {"speaker": "speaker_0", "start": 0.1, "end": 0.8, "text": "hello world"}
     ]
     assert second["segments"] == [
-        {"speaker": "speaker_0", "start": 0.1, "end": 0.8, "text": ""},
-        {"speaker": "speaker_1", "start": 1.2, "end": 1.9, "text": ""},
+        {"speaker": "speaker_0", "start": 0.1, "end": 0.8, "text": "hello world"},
+        {"speaker": "speaker_1", "start": 1.2, "end": 1.9, "text": "hello world"},
     ]
     assert created[0].calls[1]["frame_index"] == 1
     assert created[0].calls[1]["frame_start"] == 1.0
     assert created[0].calls[1]["buffer_start"] == 0.0
     assert finished["status"] == "closed"
     assert Path(finished["final_audio_path"]).exists()
+    transcript_events_path = Path(finished["transcript_jsonl_path"])
+    assert transcript_events_path.exists()
+    transcript_events = transcript_events_path.read_text(encoding="utf-8").splitlines()
+    assert len(transcript_events) == finished["transcript_event_count"]
 
 
 def test_live_session_id_is_contained_and_rejects_path_traversal(tmp_path):
     manager = LiveDiarizationSessionManager(
-        settings=RunnerSettings(work_dir=tmp_path),
+        settings=RunnerSettings(work_dir=tmp_path, live_provisional_asr_model=""),
         diarizer_factory=FakeOnlineDiarizer,
     )
 
@@ -164,7 +210,7 @@ def test_live_session_energy_vad_avoids_exact_frame_boundary(monkeypatch, tmp_pa
         return [0.05] * 16000, 1.0
 
     monkeypatch.setattr("audio_diarized_transcription_runner.live._decode_audio_to_samples", fake_decode)
-    settings = RunnerSettings(work_dir=tmp_path)
+    settings = RunnerSettings(work_dir=tmp_path, live_provisional_asr_model="")
     manager = LiveDiarizationSessionManager(settings=settings, diarizer_factory=factory)
 
     manager.create_session(
@@ -205,7 +251,7 @@ def test_live_session_rolls_back_state_when_diarizer_fails(monkeypatch, tmp_path
         return [0.05] * 16000, 1.0
 
     monkeypatch.setattr("audio_diarized_transcription_runner.live._decode_audio_to_samples", fake_decode)
-    settings = RunnerSettings(work_dir=tmp_path)
+    settings = RunnerSettings(work_dir=tmp_path, live_provisional_asr_model="")
     manager = LiveDiarizationSessionManager(
         settings=settings,
         diarizer_factory=lambda cfg: FailingSecondStepDiarizer(cfg),
@@ -279,7 +325,8 @@ def test_live_session_final_transcription_uses_live_final_asr_model(monkeypatch,
     settings = RunnerSettings(
         work_dir=tmp_path,
         default_asr_model="stt_en_conformer_ctc_large",
-        live_final_asr_model="stt_en_fastconformer_ctc_large",
+        live_provisional_asr_model="",
+        live_final_asr_model="nvidia/parakeet-tdt-0.6b-v3",
     )
     manager = LiveDiarizationSessionManager(
         settings=settings,
@@ -297,9 +344,10 @@ def test_live_session_final_transcription_uses_live_final_asr_model(monkeypatch,
     )
     finished = manager.finish_session("final_asr_test", run_final_transcription_path=True)
 
-    assert seen["asr"] == "stt_en_fastconformer_ctc_large"
+    assert seen["asr"] == "nvidia/parakeet-tdt-0.6b-v3"
     assert seen["audio_path"].name == "session.wav"
-    assert finished["final_transcription"]["models"]["asr"] == "stt_en_fastconformer_ctc_large"
+    assert finished["final_transcription"]["models"]["asr"] == "nvidia/parakeet-tdt-0.6b-v3"
+    assert finished["transcript_events"][-1]["event_type"] == "transcript.session.finished"
 
 
 def test_normalize_online_diarization_accepts_rttm_like_lines_and_dicts():

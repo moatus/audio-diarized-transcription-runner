@@ -3,13 +3,18 @@ description: |
   Audio diarized transcription runner. Accepts multipart audio upload,
   normalizes the input to 16 kHz mono WAV, runs NVIDIA NeMo offline
   diarization-with-ASR, and returns speaker-labeled text, speaker segments,
-  optional word timestamps, subtitle artifacts, and usage.
+  optional word timestamps, subtitle artifacts, and usage. Also exposes an
+  additive OpenAI-compatible bounded transcription route backed by the same
+  native Livepeer capability, and an adjacent true-streaming WebSocket route.
 
 offerings:
   - name: diarized-audio-transcription
     description: Transcribe uploaded audio and label speaker turns
     methods:
+      - POST /v1/audio/transcriptions
+      - WS /v1/audio/transcriptions/stream
       - POST /v1/audio/diarized-transcriptions
+      - WS /v1/audio/diarized-transcriptions/stream
       - GET /audio:diarized-transcription@v0/options
     input: audio
     rate_card_hints:
@@ -27,5 +32,16 @@ models:
     notes: Default speaker embedding model.
   - id: stt_en_conformer_ctc_large
     family: NVIDIA NeMo ASR
-    notes: Default English ASR model.
-
+    notes: Default English ASR model for direct requests.
+  - id: nvidia/parakeet-tdt-0.6b-v3
+    family: NVIDIA NeMo ASR
+    notes: Default English ASR model for live-session final transcription.
+  - id: nvidia/nemotron-speech-streaming-en-0.6b
+    family: NVIDIA NeMo streaming ASR
+    notes: Default true streaming ASR model for the WebSocket PoC.
+  - id: nvidia/parakeet_realtime_eou_120m-v1
+    family: NVIDIA NeMo streaming ASR
+    notes: Optional Parakeet realtime EOU ASR candidate for the WebSocket PoC.
+  - id: nvidia/diar_streaming_sortformer_4spk-v2.1
+    family: NVIDIA NeMo streaming diarization
+    notes: Default true streaming Sortformer diarization model for the WebSocket PoC.

@@ -9,8 +9,8 @@ dependencies = [
     "uvicorn[standard]>=0.30.0,<0.33.0",
     "python-multipart>=0.0.12,<0.1.0",
     "omegaconf>=2.3.0,<3.0.0",
-    "pytorch-lightning==2.4.0",
-    "nemo_toolkit[asr]==2.0.0",
+    "nemo_toolkit[asr]==2.6.2",
+    "websockets>=13.0,<16.0",
 ]
 
 [project.scripts]
@@ -22,4 +22,3 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/audio_diarized_transcription_runner"]
-

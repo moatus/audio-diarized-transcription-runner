@@ -19,10 +19,14 @@ from .pipeline import (
     DiarizationRequest,
     RunnerInputError,
     UnsupportedParameterError,
+    _hypothesis_field,
     _normalize_audio,
     _round_seconds,
     _safe_stem,
     _speaker_summaries,
+    _timestamp_entry_get,
+    _timestamp_entry_seconds,
+    _unwrap_transcribe_result,
     run_diarized_transcription,
 )
 from .settings import RunnerSettings, configure_cache_environment
@@ -30,6 +34,7 @@ from .settings import RunnerSettings, configure_cache_environment
 
 SUPPORTED_LIVE_VAD_STRATEGIES = {"energy", "provided"}
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+TRANSCRIPT_EVENT_SCHEMA_VERSION = "livepeer.diarized_transcript_event.v1"
 
 
 class LiveSessionNotFoundError(KeyError):
@@ -61,6 +66,15 @@ class LiveAudioIngestRequest:
     vad_segments: Optional[List[Dict[str, float]]] = None
 
 
+@dataclass(frozen=True)
+class ProvisionalASRResult:
+    text: str
+    words: List[Dict[str, Any]]
+    model: str
+    text_status: str
+    unavailable_reason: str = ""
+
+
 class LiveDiarizationSession:
     """One online diarizer instance plus rolling audio/VAD state for a live session."""
 
@@ -70,6 +84,7 @@ class LiveDiarizationSession:
         settings: RunnerSettings,
         config: LiveSessionConfig,
         diarizer_factory: Optional[Callable[[Any], Any]] = None,
+        provisional_asr_factory: Optional[Callable[[str, str], Any]] = None,
     ) -> None:
         _validate_live_config(config)
         self.settings = settings
@@ -82,13 +97,18 @@ class LiveDiarizationSession:
         self.closed = False
         self._lock = threading.RLock()
         self._diarizer_factory = diarizer_factory
+        self._provisional_asr_factory = provisional_asr_factory
         self._diarizer: Any = None
+        self._provisional_asr_model: Any = None
         self._samples: List[float] = []
         self._cumulative_vad: List[List[float]] = []
         self._diarizer_vad: List[List[float]] = []
         self._segments: List[Dict[str, Any]] = []
         self._last_emitted_end = 0.0
         self._chunk_count = 0
+        self.transcript_events_path = self.session_dir / "transcript-events.jsonl"
+        self._transcript_events: List[Dict[str, Any]] = []
+        self._next_transcript_event_index = 0
 
     def start(self) -> Dict[str, Any]:
         with self._lock:
@@ -97,6 +117,17 @@ class LiveDiarizationSession:
                 self.chunk_dir.mkdir(parents=True, exist_ok=True)
                 self._write_bootstrap_manifest()
                 self._diarizer = self._build_diarizer()
+                self._append_transcript_event(
+                    {
+                        "event_type": "transcript.session.started",
+                        "status": "active",
+                        "is_provisional": True,
+                        "is_final": False,
+                        "authority": "online_diarization",
+                        "text_status": "not_applicable",
+                        "text": "",
+                    }
+                )
             return self.snapshot("session.started")
 
     def ingest_audio(self, request: LiveAudioIngestRequest) -> Dict[str, Any]:
@@ -153,26 +184,52 @@ class LiveDiarizationSession:
             if new_segments:
                 last_emitted_end = max(float(segment["end"]) for segment in new_segments)
 
+            provisional_asr = self._transcribe_provisional_chunk(
+                normalized_path=normalized_path,
+                chunk_start=chunk_start,
+            )
+            enriched_new_segments = _attach_provisional_text_to_segments(
+                segments=new_segments,
+                asr_result=provisional_asr,
+            )
+            enriched_segments = _merge_segment_text(
+                current_segments=segments,
+                previous_segments=self._segments,
+                new_segments=enriched_new_segments,
+            )
+
             self._samples = new_samples
             self._cumulative_vad = cumulative_vad
             self._diarizer_vad = diarizer_vad
-            self._segments = segments
+            self._segments = enriched_segments
             self._last_emitted_end = last_emitted_end
             self._chunk_count += 1
             self.updated_at = time.time()
+            chunk_payload = {
+                "sequence_index": sequence_index,
+                "filename": request.filename,
+                "content_type": request.content_type,
+                "duration_seconds": _round_seconds(chunk_duration),
+                "start": _round_seconds(chunk_start),
+                "end": _round_seconds(chunk_end),
+                "vad_segments": _segments_from_intervals(chunk_vad),
+                "normalized_path": str(normalized_path),
+                "text": provisional_asr.text,
+                "text_status": provisional_asr.text_status,
+                "asr_model": provisional_asr.model,
+            }
+            if provisional_asr.unavailable_reason:
+                chunk_payload["text_unavailable_reason"] = provisional_asr.unavailable_reason
+            transcript_events = self._append_ingest_transcript_events(
+                chunk=chunk_payload,
+                new_segments=enriched_new_segments,
+                provisional_asr=provisional_asr,
+            )
             return {
                 **self.snapshot("audio.ingested"),
-                "chunk": {
-                    "sequence_index": sequence_index,
-                    "filename": request.filename,
-                    "content_type": request.content_type,
-                    "duration_seconds": _round_seconds(chunk_duration),
-                    "start": _round_seconds(chunk_start),
-                    "end": _round_seconds(chunk_end),
-                    "vad_segments": _segments_from_intervals(chunk_vad),
-                    "normalized_path": str(normalized_path),
-                },
-                "new_segments": new_segments,
+                "chunk": chunk_payload,
+                "new_segments": enriched_new_segments,
+                "transcript_events": transcript_events,
             }
 
     def finish(
@@ -191,6 +248,7 @@ class LiveDiarizationSession:
                 **self.snapshot("session.finished"),
                 "final_audio_path": str(final_audio_path),
                 "final_transcription": None,
+                "transcript_events": [],
             }
             if run_final_transcription_path and self.duration_seconds > 0:
                 transcription_settings = dataclass_replace(
@@ -214,6 +272,24 @@ class LiveDiarizationSession:
                     request,
                     transcription_settings,
                 )
+                response["transcript_events"] = self._append_final_transcript_events(
+                    response["final_transcription"]
+                )
+            response["transcript_events"].append(
+                self._append_transcript_event(
+                    {
+                        "event_type": "transcript.session.finished",
+                        "status": "closed",
+                        "is_provisional": False,
+                        "is_final": True,
+                        "authority": "session_lifecycle",
+                        "text_status": "not_applicable",
+                        "text": "",
+                    }
+                )
+            )
+            response["transcript_event_count"] = len(self._transcript_events)
+            response["transcript_jsonl_path"] = str(self.transcript_events_path)
             return response
 
     @property
@@ -235,13 +311,75 @@ class LiveDiarizationSession:
             "speakers": speakers,
             "segments": self._segments,
             "vad_segments": _segments_from_intervals(self._cumulative_vad),
+            "transcript_event_count": len(self._transcript_events),
+            "transcript_jsonl_path": str(self.transcript_events_path),
             "models": {
                 "online_diarizer": "OnlineClusteringDiarizer",
                 "vad": self.config.vad_strategy,
                 "speaker_embeddings": self.settings.default_speaker_model,
-                "asr": "final-offline" if self.settings.default_asr_model else None,
+                "asr": self.settings.live_provisional_asr_model or None,
+                "live_final_asr": self.settings.live_final_asr_model,
             },
         }
+
+    def _transcribe_provisional_chunk(
+        self,
+        *,
+        normalized_path: Path,
+        chunk_start: float,
+    ) -> ProvisionalASRResult:
+        model_name = str(self.settings.live_provisional_asr_model or "").strip()
+        if not model_name:
+            return ProvisionalASRResult(
+                text="",
+                words=[],
+                model="",
+                text_status="not_available_online",
+                unavailable_reason="LIVE_PROVISIONAL_ASR_MODEL is empty.",
+            )
+        try:
+            model = self._get_provisional_asr_model(model_name)
+            hypothesis = _transcribe_one_audio_file(model, normalized_path)
+            text = _hypothesis_text(hypothesis)
+            words = _extract_provisional_words(hypothesis, chunk_start=chunk_start)
+            return ProvisionalASRResult(
+                text=text,
+                words=words,
+                model=model_name,
+                text_status="available" if text else "empty",
+            )
+        except Exception as error:
+            return ProvisionalASRResult(
+                text="",
+                words=[],
+                model=model_name,
+                text_status="not_available_online",
+                unavailable_reason=f"provisional ASR unavailable: {error}",
+            )
+
+    def _get_provisional_asr_model(self, model_name: str) -> Any:
+        if self._provisional_asr_model is not None:
+            return self._provisional_asr_model
+        if self._provisional_asr_factory is not None:
+            self._provisional_asr_model = self._provisional_asr_factory(
+                model_name,
+                self.settings.device,
+            )
+            return self._provisional_asr_model
+
+        from nemo.collections.asr.models import ASRModel
+
+        if model_name.endswith(".nemo"):
+            asr_model = ASRModel.restore_from(restore_path=model_name)
+        else:
+            asr_model = ASRModel.from_pretrained(model_name)
+        if str(self.settings.device).startswith("cuda"):
+            asr_model = asr_model.cuda()
+        elif hasattr(asr_model, "to"):
+            asr_model = asr_model.to(self.settings.device)
+        asr_model.eval()
+        self._provisional_asr_model = asr_model
+        return self._provisional_asr_model
 
     def _build_diarizer(self) -> Any:
         if self._diarizer_factory is not None:
@@ -338,6 +476,151 @@ class LiveDiarizationSession:
         }
         manifest_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
+    def _append_ingest_transcript_events(
+        self,
+        *,
+        chunk: Dict[str, Any],
+        new_segments: Sequence[Dict[str, Any]],
+        provisional_asr: ProvisionalASRResult,
+    ) -> List[Dict[str, Any]]:
+        chunk_text = str(chunk.get("text") or "")
+        chunk_text_status = str(chunk.get("text_status") or "empty")
+        events = [
+            self._append_transcript_event(
+                {
+                    "event_type": "transcript.chunk_ingested",
+                    "status": "active",
+                    "chunk_sequence_index": chunk["sequence_index"],
+                    "start": chunk["start"],
+                    "end": chunk["end"],
+                    "duration_seconds": chunk["duration_seconds"],
+                    "speaker": None,
+                    "text": chunk_text,
+                    "is_provisional": True,
+                    "is_final": False,
+                    "authority": "online_diarization_provisional_asr",
+                    "text_status": chunk_text_status,
+                    "asr_model": provisional_asr.model,
+                    **(
+                        {"text_unavailable_reason": provisional_asr.unavailable_reason}
+                        if provisional_asr.unavailable_reason
+                        else {}
+                    ),
+                }
+            )
+        ]
+        for segment in new_segments:
+            text = str(segment.get("text") or "")
+            text_status = (
+                "available"
+                if text.strip()
+                else "empty"
+                if provisional_asr.text
+                else provisional_asr.text_status
+            )
+            events.append(
+                self._append_transcript_event(
+                    {
+                        "event_type": "transcript.segment",
+                        "status": "active",
+                        "chunk_sequence_index": chunk["sequence_index"],
+                        "segment_id": _segment_event_id(
+                            self.session_id,
+                            "provisional",
+                            segment,
+                        ),
+                        "start": _round_seconds(segment.get("start", 0.0)),
+                        "end": _round_seconds(segment.get("end", 0.0)),
+                        "speaker": segment.get("speaker"),
+                        "text": text,
+                        "is_provisional": True,
+                        "is_final": False,
+                        "authority": "online_diarization_provisional_asr",
+                        "text_status": text_status,
+                        "asr_model": provisional_asr.model,
+                        **(
+                            {"text_unavailable_reason": provisional_asr.unavailable_reason}
+                            if not text.strip() and provisional_asr.unavailable_reason
+                            else {}
+                        ),
+                    }
+                )
+            )
+        return events
+
+    def _append_final_transcript_events(
+        self,
+        final_transcription: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        segments = final_transcription.get("segments") or []
+        models = final_transcription.get("models") or {}
+        asr_model = str(models.get("asr") or self.settings.live_final_asr_model)
+        events: List[Dict[str, Any]] = []
+        if segments:
+            for index, segment in enumerate(segments):
+                text = str(segment.get("text") or "").strip()
+                events.append(
+                    self._append_transcript_event(
+                        {
+                            "event_type": "transcript.segment",
+                            "status": "closed",
+                            "segment_id": _segment_event_id(
+                                self.session_id,
+                                f"final:{index:06d}",
+                                segment,
+                            ),
+                            "start": _round_seconds(segment.get("start", 0.0)),
+                            "end": _round_seconds(segment.get("end", 0.0)),
+                            "speaker": segment.get("speaker"),
+                            "text": text,
+                            "is_provisional": False,
+                            "is_final": True,
+                            "authority": "final_offline_diarized_transcription",
+                            "text_status": "available" if text else "empty",
+                            "asr_model": asr_model,
+                        }
+                    )
+                )
+        else:
+            text = str(final_transcription.get("text") or "").strip()
+            if text:
+                events.append(
+                    self._append_transcript_event(
+                        {
+                            "event_type": "transcript.segment",
+                            "status": "closed",
+                            "segment_id": f"{self.session_id}:final:text",
+                            "start": 0.0,
+                            "end": _round_seconds(self.duration_seconds),
+                            "speaker": None,
+                            "text": text,
+                            "is_provisional": False,
+                            "is_final": True,
+                            "authority": "final_offline_diarized_transcription",
+                            "text_status": "available",
+                            "asr_model": asr_model,
+                        }
+                    )
+                )
+        return events
+
+    def _append_transcript_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        event_index = self._next_transcript_event_index
+        self._next_transcript_event_index += 1
+        event_with_defaults = {
+            "schema_version": TRANSCRIPT_EVENT_SCHEMA_VERSION,
+            "event_id": f"{self.session_id}:transcript:{event_index:06d}",
+            "transcript_event_index": event_index,
+            "session_id": self.session_id,
+            "emitted_at_epoch": time.time(),
+            **event,
+        }
+        self.transcript_events_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.transcript_events_path.open("a", encoding="utf-8") as output:
+            output.write(json.dumps(event_with_defaults, sort_keys=True) + "\n")
+        self._transcript_events.append(event_with_defaults)
+        return event_with_defaults
+
 
 class LiveDiarizationSessionManager:
     def __init__(
@@ -345,9 +628,11 @@ class LiveDiarizationSessionManager:
         *,
         settings: RunnerSettings,
         diarizer_factory: Optional[Callable[[Any], Any]] = None,
+        provisional_asr_factory: Optional[Callable[[str, str], Any]] = None,
     ) -> None:
         self.settings = settings
         self._diarizer_factory = diarizer_factory
+        self._provisional_asr_factory = provisional_asr_factory
         self._sessions: Dict[str, LiveDiarizationSession] = {}
         self._lock = threading.Lock()
 
@@ -360,6 +645,7 @@ class LiveDiarizationSessionManager:
                 settings=self.settings,
                 config=config,
                 diarizer_factory=self._diarizer_factory,
+                provisional_asr_factory=self._provisional_asr_factory,
             )
             self._sessions[config.session_id] = session
         return session.start()
@@ -579,6 +865,177 @@ def _normalize_online_diarization(diar_hyp: Any) -> List[Dict[str, Any]]:
     return segments
 
 
+def _transcribe_one_audio_file(asr_model: Any, audio_path: Path) -> Any:
+    audio_paths = [str(audio_path)]
+    try:
+        result = asr_model.transcribe(audio_paths, batch_size=1, timestamps=True)
+    except TypeError:
+        result = asr_model.transcribe(audio_paths, batch_size=1)
+    hypotheses = _unwrap_transcribe_result(result)
+    if not hypotheses:
+        return ""
+    return hypotheses[0]
+
+
+def _hypothesis_text(hypothesis: Any) -> str:
+    if hypothesis is None:
+        return ""
+    if isinstance(hypothesis, str):
+        return hypothesis.strip()
+    text = _hypothesis_field(hypothesis, "text")
+    if text is None:
+        text = _hypothesis_field(hypothesis, "transcription")
+    return str(text or "").strip()
+
+
+def _extract_provisional_words(
+    hypothesis: Any,
+    *,
+    chunk_start: float,
+) -> List[Dict[str, Any]]:
+    timestamp = _hypothesis_field(hypothesis, "timestamp")
+    if not isinstance(timestamp, dict):
+        timestamp = _hypothesis_field(hypothesis, "timestep")
+    if not isinstance(timestamp, dict):
+        return []
+
+    word_entries = timestamp.get("word") or []
+    words: List[Dict[str, Any]] = []
+    fallback_words = _hypothesis_text(hypothesis).split()
+    for index, entry in enumerate(word_entries):
+        word = _timestamp_entry_get(entry, "word")
+        if word is None:
+            word = _timestamp_entry_get(entry, "text")
+        if word is None and index < len(fallback_words):
+            word = fallback_words[index]
+        start = _timestamp_entry_seconds(entry, ("start", "start_time"))
+        end = _timestamp_entry_seconds(entry, ("end", "end_time"))
+        word_text = str(word or "").strip()
+        if not word_text or start is None or end is None:
+            continue
+        absolute_start = float(chunk_start) + float(start)
+        absolute_end = float(chunk_start) + float(end)
+        words.append(
+            {
+                "word": word_text,
+                "start": _round_seconds(absolute_start),
+                "end": _round_seconds(absolute_end),
+            }
+        )
+    return words
+
+
+def _attach_provisional_text_to_segments(
+    *,
+    segments: Sequence[Dict[str, Any]],
+    asr_result: ProvisionalASRResult,
+) -> List[Dict[str, Any]]:
+    if not segments:
+        return []
+    if asr_result.words:
+        return [
+            {
+                **segment,
+                "text": _words_for_segment(segment, asr_result.words),
+            }
+            for segment in segments
+        ]
+
+    text = asr_result.text.strip()
+    if not text:
+        return [dict(segment) for segment in segments]
+    if len(segments) == 1:
+        return [{**segments[0], "text": text}]
+
+    split_text = _split_text_across_segments(text, segments)
+    return [
+        {
+            **segment,
+            "text": split_text[index],
+        }
+        for index, segment in enumerate(segments)
+    ]
+
+
+def _words_for_segment(segment: Dict[str, Any], words: Sequence[Dict[str, Any]]) -> str:
+    start = float(segment.get("start", 0.0))
+    end = float(segment.get("end", start))
+    selected = []
+    for word in words:
+        word_start = float(word.get("start", 0.0))
+        word_end = float(word.get("end", word_start))
+        midpoint = (word_start + word_end) / 2.0
+        if start <= midpoint <= end:
+            selected.append(str(word.get("word") or ""))
+    return " ".join(word for word in selected if word).strip()
+
+
+def _split_text_across_segments(
+    text: str,
+    segments: Sequence[Dict[str, Any]],
+) -> List[str]:
+    tokens = text.split()
+    if not tokens:
+        return ["" for _ in segments]
+    durations = [
+        max(0.0, float(segment.get("end", 0.0)) - float(segment.get("start", 0.0)))
+        for segment in segments
+    ]
+    total_duration = sum(durations)
+    if total_duration <= 0:
+        durations = [1.0 for _ in segments]
+        total_duration = float(len(segments))
+
+    output: List[str] = []
+    token_index = 0
+    for index, duration in enumerate(durations):
+        remaining_segments = len(segments) - index
+        remaining_tokens = len(tokens) - token_index
+        if index == len(durations) - 1:
+            count = remaining_tokens
+        else:
+            proportional_count = round(len(tokens) * (duration / total_duration))
+            count = max(1, min(proportional_count, remaining_tokens - (remaining_segments - 1)))
+        output.append(" ".join(tokens[token_index : token_index + count]).strip())
+        token_index += count
+    return output
+
+
+def _merge_segment_text(
+    *,
+    current_segments: Sequence[Dict[str, Any]],
+    previous_segments: Sequence[Dict[str, Any]],
+    new_segments: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    text_by_key = {
+        _segment_key(segment): str(segment.get("text") or "")
+        for segment in previous_segments
+        if str(segment.get("text") or "").strip()
+    }
+    text_by_key.update(
+        {
+            _segment_key(segment): str(segment.get("text") or "")
+            for segment in new_segments
+            if str(segment.get("text") or "").strip()
+        }
+    )
+    return [
+        {
+            **segment,
+            "text": text_by_key.get(_segment_key(segment), str(segment.get("text") or "")),
+        }
+        for segment in current_segments
+    ]
+
+
+def _segment_key(segment: Dict[str, Any]) -> tuple[str, float, float]:
+    return (
+        str(segment.get("speaker") or ""),
+        _round_seconds(segment.get("start", 0.0)),
+        _round_seconds(segment.get("end", 0.0)),
+    )
+
+
 def _normalize_speaker_label(value: str) -> str:
     value = value.strip()
     if value.startswith("speaker_"):
@@ -589,6 +1046,13 @@ def _normalize_speaker_label(value: str) -> str:
 
 def _segments_from_intervals(intervals: Iterable[Sequence[float]]) -> List[Dict[str, float]]:
     return [{"start": _round_seconds(start), "end": _round_seconds(end)} for start, end in intervals]
+
+
+def _segment_event_id(session_id: str, phase: str, segment: Dict[str, Any]) -> str:
+    speaker = str(segment.get("speaker") or "unknown")
+    start = _round_seconds(segment.get("start", 0.0))
+    end = _round_seconds(segment.get("end", 0.0))
+    return f"{session_id}:{phase}:{speaker}:{start:.3f}-{end:.3f}"
 
 
 def _live_config_payload(config: LiveSessionConfig) -> Dict[str, Any]:
