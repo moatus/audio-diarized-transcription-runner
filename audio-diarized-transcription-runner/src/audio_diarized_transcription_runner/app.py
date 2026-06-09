@@ -138,7 +138,7 @@ def options() -> dict:
         "models": [settings.default_model],
         "languages": ["en"],
         "presets": [settings.default_preset],
-        "response_formats": ["json", "text", "srt", "vtt"],
+        "response_formats": ["json", "verbose_json", "text", "srt", "vtt"],
         "openai_compatible": {
             "endpoint": "POST /v1/audio/transcriptions",
             "native_capability": settings.capability_name,
@@ -159,8 +159,8 @@ def options() -> dict:
             "model": settings.default_model,
             "language": "en",
             "preset": settings.default_preset,
-            "include_words": True,
-            "include_artifacts": True,
+            "include_words": False,
+            "include_artifacts": False,
             "max_speakers": settings.default_max_speakers,
         },
         "limits": {
