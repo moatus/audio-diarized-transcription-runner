@@ -28,6 +28,7 @@ pip-wheel-metadata/
 .eggs/
 .ipynb_checkpoints/
 artifacts/
+benchmarks/
 models/
 tmp/
 logs/
