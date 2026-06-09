@@ -36,6 +36,7 @@ from .streaming import (
 
 
 settings = RunnerSettings()
+OPTIONS_PATH = f"/{settings.capability_name}/options"
 live_sessions = LiveDiarizationSessionManager(settings=settings)
 true_streaming_sessions = TrueStreamingSessionManager(settings=settings)
 startup_error: Optional[str] = None
@@ -121,7 +122,7 @@ def healthz() -> JSONResponse:
     )
 
 
-@app.get("/audio:diarized-transcription@v0/options")
+@app.get(OPTIONS_PATH)
 def options() -> dict:
     return {
         "capability": settings.capability_name,
@@ -131,7 +132,7 @@ def options() -> dict:
         "endpoints": {
             "bounded_transcriptions": "POST /v1/audio/transcriptions",
             "openai_compatible": "POST /v1/audio/transcriptions",
-            "options": "GET /audio:diarized-transcription@v0/options",
+            "options": f"GET {OPTIONS_PATH}",
             "live_sessions": "POST /v1/audio/diarized-transcriptions/live/sessions",
             "true_streaming": "WS /v1/audio/transcriptions/stream",
         },
@@ -141,7 +142,7 @@ def options() -> dict:
         "response_formats": ["json", "verbose_json", "text", "srt", "vtt"],
         "openai_compatible": {
             "endpoint": "POST /v1/audio/transcriptions",
-            "native_capability": settings.capability_name,
+            "capability": settings.capability_name,
             "additive": True,
             "response_formats": ["json", "verbose_json", "text", "srt", "vtt"],
             "timestamp_granularities": ["segment", "word"],

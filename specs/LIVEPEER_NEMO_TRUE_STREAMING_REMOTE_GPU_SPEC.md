@@ -24,8 +24,8 @@ into a broader workflow runtime.
 The public transcription surface is intentionally reduced to two routes:
 
 - `POST /v1/audio/transcriptions` is the intended bounded
-  OpenAI-compatible request path backed by the same native
-  `audio:diarized-transcription@v0` capability. Diarization, speaker labels,
+  OpenAI-compatible request path for the
+  `openai:audio-transcriptions` capability. Diarization, speaker labels,
   artifacts, segment timestamps, and word timestamps are additive flags and
   extensions on this route.
 - `/v1/audio/diarized-transcriptions/live/sessions/*` remains the additive

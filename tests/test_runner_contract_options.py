@@ -5,11 +5,11 @@ from audio_diarized_transcription_runner import app as app_module
 
 def test_options_advertises_two_public_transcription_routes():
     with TestClient(app_module.app) as client:
-        response = client.get("/audio:diarized-transcription@v0/options")
+        response = client.get("/openai:audio-transcriptions/options")
 
     assert response.status_code == 200
     body = response.json()
-    assert body["capability"] == "audio:diarized-transcription@v0"
+    assert body["capability"] == "openai:audio-transcriptions"
     assert body["endpoints"]["bounded_transcriptions"] == "POST /v1/audio/transcriptions"
     assert body["endpoints"]["openai_compatible"] == "POST /v1/audio/transcriptions"
     assert body["endpoints"]["true_streaming"] == "WS /v1/audio/transcriptions/stream"
@@ -17,7 +17,7 @@ def test_options_advertises_two_public_transcription_routes():
     assert "legacy_true_streaming" not in body["endpoints"]
     assert body["openai_compatible"] == {
         "endpoint": "POST /v1/audio/transcriptions",
-        "native_capability": "audio:diarized-transcription@v0",
+        "capability": "openai:audio-transcriptions",
         "additive": True,
         "response_formats": ["json", "verbose_json", "text", "srt", "vtt"],
         "timestamp_granularities": ["segment", "word"],

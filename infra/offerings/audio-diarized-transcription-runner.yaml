@@ -1,4 +1,4 @@
-capability: audio:diarized-transcription@v0
+capability: openai:audio-transcriptions
 description: |
   Audio diarized transcription runner. Accepts multipart audio upload,
   normalizes the input to 16 kHz mono WAV, runs NVIDIA NeMo diarization-with-ASR
@@ -7,12 +7,12 @@ description: |
   transcription route and an adjacent true-streaming WebSocket route.
 
 offerings:
-  - name: diarized-audio-transcription
+  - name: openai-audio-transcriptions
     description: Transcribe uploaded audio and label speaker turns
     methods:
       - POST /v1/audio/transcriptions
       - WS /v1/audio/transcriptions/stream
-      - GET /audio:diarized-transcription@v0/options
+      - GET /openai:audio-transcriptions/options
     input: audio
     rate_card_hints:
       unit: audio_seconds

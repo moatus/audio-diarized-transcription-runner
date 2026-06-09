@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_CAPABILITY_NAME = "audio:diarized-transcription@v0"
+DEFAULT_CAPABILITY_NAME = "openai:audio-transcriptions"
 DEFAULT_MODEL_NAME = "nemo-diarized-transcription-meeting-v0"
 DEFAULT_LIVE_PROVISIONAL_ASR_MODEL = "stt_en_conformer_ctc_large"
 DEFAULT_LIVE_FINAL_ASR_MODEL = "nvidia/parakeet-tdt-0.6b-v3"

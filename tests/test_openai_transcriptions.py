@@ -8,7 +8,7 @@ def _fake_diarized_result():
     return {
         "id": "dtx_local_test",
         "status": "success",
-        "capability": "audio:diarized-transcription@v0",
+        "capability": "openai:audio-transcriptions",
         "mode": "local-direct",
         "models": {
             "vad": "vad",

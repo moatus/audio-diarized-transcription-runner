@@ -14,7 +14,7 @@ services:
     environment:
       - RUNNER_PORT=8080
       - DEVICE=${NEMO_DEVICE:-cuda}
-      - CAPABILITY_NAME=audio:diarized-transcription@v0
+      - CAPABILITY_NAME=openai:audio-transcriptions
       - METRICS_ENABLED=${NEMO_METRICS_ENABLED:-false}
       - MAX_QUEUE_SIZE=${NEMO_MAX_QUEUE_SIZE:-1}
       - MAX_AUDIO_MB=${NEMO_MAX_AUDIO_MB:-100}

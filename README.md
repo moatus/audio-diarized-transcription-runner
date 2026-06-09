@@ -1,6 +1,6 @@
 # audio-diarized-transcription-runner
 
-Workload binary that serves the Livepeer `audio:diarized-transcription@v0`
+Workload binary that serves the Livepeer `openai:audio-transcriptions`
 capability over HTTP and WebSocket transports. It exposes:
 
 - a bounded OpenAI-compatible transcription route at `POST /v1/audio/transcriptions`
@@ -16,10 +16,10 @@ Docker image per capability; one process per broker-dispatched container.
 
 | Image | Language | Capability |
 |---|---|---|
-| `audio-diarized-transcription-runner` | Python | `audio:diarized-transcription@v0` with additive OpenAI-compatible transcription route |
+| `audio-diarized-transcription-runner` | Python | `openai:audio-transcriptions` with additive diarization, timestamps, and true streaming |
 
-The runner keeps the native Livepeer capability framing, but the intended
-bounded integration path for general-purpose clients is now
+The runner is packaged as the Livepeer `openai:audio-transcriptions`
+capability, and the intended bounded integration path for general-purpose clients is
 `POST /v1/audio/transcriptions`. Richer timestamp, word, and diarization
 behavior is additive on that route. Persistent live audio uses the adjacent true
 streaming WebSocket path `/v1/audio/transcriptions/stream`. It also exposes an

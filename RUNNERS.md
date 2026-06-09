@@ -2,7 +2,7 @@
 
 ## `audio-diarized-transcription-runner`
 
-Serves the Livepeer `audio:diarized-transcription@v0` capability over HTTP.
+Serves the Livepeer `openai:audio-transcriptions` capability over HTTP.
 The runner accepts one multipart audio upload, decodes it with `ffmpeg`, converts
 it to 16 kHz mono WAV, and runs NVIDIA NeMo offline diarization-with-ASR.
 
@@ -11,8 +11,8 @@ it to 16 kHz mono WAV, and runs NVIDIA NeMo offline diarization-with-ASR.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/healthz` | Runtime readiness and CUDA facts |
-| `GET` | `/audio:diarized-transcription@v0/options` | Capability defaults and limits |
-| `POST` | `/v1/audio/transcriptions` | Main OpenAI-compatible bounded transcription request backed by the native diarized transcription capability |
+| `GET` | `/openai:audio-transcriptions/options` | Capability defaults and limits |
+| `POST` | `/v1/audio/transcriptions` | Main bounded transcription request for the `openai:audio-transcriptions` capability |
 | `POST` | `/v1/audio/diarized-transcriptions/live/sessions` | Create a stateful online diarization session |
 | `POST` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}/audio` | Ingest one audio chunk into a live session |
 | `GET` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}` | Read the latest live diarization snapshot |
@@ -49,7 +49,7 @@ returns `507`.
 |---|---|---|
 | `RUNNER_PORT` | `8080` | HTTP listen port |
 | `DEVICE` | `cuda` | `cuda` or `cpu`; CUDA is expected for production |
-| `CAPABILITY_NAME` | `audio:diarized-transcription@v0` | Capability advertised in responses |
+| `CAPABILITY_NAME` | `openai:audio-transcriptions` | Capability advertised in responses |
 | `METRICS_ENABLED` | `false` | Expose `/metrics` |
 | `MAX_QUEUE_SIZE` | `1` | Concurrent in-process request slots |
 | `MAX_AUDIO_MB` | `100` | Upload limit |
@@ -101,7 +101,7 @@ JSON responses include:
 `POST /v1/audio/transcriptions` is the intended bounded request route for
 clients that already use the OpenAI audio transcription API. It does not change
 the runner capability id; requests are still served by
-`audio:diarized-transcription@v0` and the same NeMo diarization stack.
+`openai:audio-transcriptions` and the same NeMo diarization stack.
 
 The route accepts multipart form data:
 
@@ -114,11 +114,11 @@ The route accepts multipart form data:
 | `timestamp_granularities[]` | no | `segment` | `segment`, `word`, or both; also accepts comma-separated `timestamp_granularities`. |
 | `prompt` | no |  | Accepted for OpenAI request-shape compatibility and ignored. |
 | `temperature` | no |  | Accepted for OpenAI request-shape compatibility and ignored. |
-| `preset` | no | `meeting` | Livepeer extension field for the native diarization preset. |
+| `preset` | no | `meeting` | Livepeer extension field selecting the diarization preset. |
 | `num_speakers` | no |  | Livepeer extension field for exact speaker count, if known. |
 | `max_speakers` | no | `8` | Livepeer extension field for clustering upper bound. |
 | `diarization` / `include_diarization` | no | `false` | Include speaker labels and the generic top-level diarization extension in `verbose_json`. |
-| `include_words` | no | `false` | Include native word timestamps when building verbose responses; `timestamp_granularities[]=word` also enables this. |
+| `include_words` | no | `false` | Include word timestamps when building verbose responses; `timestamp_granularities[]=word` also enables this. |
 | `include_artifacts` | no | `false` | Include local artifact paths under the Livepeer extension object. |
 
 `json`, `text`, `srt`, and `vtt` follow OpenAI-style response formats.
