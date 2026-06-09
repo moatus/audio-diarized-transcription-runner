@@ -37,12 +37,16 @@ def main() -> int:
             "language": "en",
             "preset": "meeting",
             "max_speakers": str(args.max_speakers),
-            "response_format": args.response_format,
+            "response_format": "verbose_json" if args.response_format == "json" else args.response_format,
+            "diarization": "true",
+            "timestamp_granularities[]": "segment,word",
+            "include_words": "true",
+            "include_artifacts": "true",
             **({"num_speakers": str(args.num_speakers)} if args.num_speakers else {}),
         },
     )
     request = urllib.request.Request(
-        f"{args.runner_url.rstrip('/')}/v1/audio/diarized-transcriptions",
+        f"{args.runner_url.rstrip('/')}/v1/audio/transcriptions",
         data=body,
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
@@ -96,4 +100,3 @@ def _multipart_body(boundary: str, audio_path: Path, fields: dict[str, str]) -> 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

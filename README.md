@@ -4,11 +4,10 @@ Workload binary that serves the Livepeer `audio:diarized-transcription@v0`
 capability over HTTP and WebSocket transports. It exposes:
 
 - a bounded OpenAI-compatible transcription route at `POST /v1/audio/transcriptions`
-- a native bounded diarized route at `POST /v1/audio/diarized-transcriptions`
 - an adjacent true streaming route at `WS /v1/audio/transcriptions/stream`
 
-The bounded routes are backed by NVIDIA NeMo diarization-with-ASR. The
-streaming route uses NeMo true-streaming ASR plus streaming diarization. One
+The bounded route is backed by NVIDIA NeMo diarization-with-ASR. The streaming
+route uses NeMo true-streaming ASR plus streaming diarization. One
 Docker image per capability; one process per broker-dispatched container.
 
 > **For agents:** start at [`AGENTS.md`](./AGENTS.md).
@@ -23,9 +22,8 @@ The runner keeps the native Livepeer capability framing, but the intended
 bounded integration path for general-purpose clients is now
 `POST /v1/audio/transcriptions`. Richer timestamp, word, and diarization
 behavior is additive on that route. Persistent live audio uses the adjacent true
-streaming WebSocket path `/v1/audio/transcriptions/stream`; the older
-`/v1/audio/diarized-transcriptions/stream` path remains as a compatibility
-alias. It also exposes an additive stateful live-session API under
+streaming WebSocket path `/v1/audio/transcriptions/stream`. It also exposes an
+additive stateful live-session API under
 `/v1/audio/diarized-transcriptions/live/sessions` backed by NeMo
 `OnlineClusteringDiarizer`. Audio is normalized with `ffmpeg`; models and
 caches live under `MODEL_CACHE_DIR`.
@@ -39,19 +37,17 @@ runner options endpoint as the current contract documentation.
 
 ## API surfaces
 
-The runner exposes three additive API surfaces:
+The runner exposes two public transcription API surfaces:
 
 | Surface | Path | Use when | Transport |
 |---|---|---|---|
 | OpenAI-compatible bounded transcription | `POST /v1/audio/transcriptions` | Your app already knows how to call OpenAI audio transcription APIs, or you want one request per file/recording | multipart HTTP |
-| Native bounded diarized transcription | `POST /v1/audio/diarized-transcriptions` | You want the full native diarized response shape directly | multipart HTTP |
 | Adjacent true streaming transcription | `WS /v1/audio/transcriptions/stream` | You have live PCM audio and want one persistent session with low-latency events | WebSocket |
 
 The key split is intentional:
 
 - `POST /v1/audio/transcriptions` is the bounded file/request API.
 - `WS /v1/audio/transcriptions/stream` is the live streaming API.
-- The old WebSocket path `WS /v1/audio/diarized-transcriptions/stream` remains as a compatibility alias.
 
 ## OpenAI-compatible bounded transcription
 
@@ -154,33 +150,6 @@ The `diarization` object contains:
 This is the recommended route if you want OpenAI-style compatibility first and
 speaker-aware/timestamp-aware extensions second.
 
-## Native bounded diarized transcription
-
-`POST /v1/audio/diarized-transcriptions` is the native route for callers that
-want the full diarized payload without the OpenAI-compatible compatibility
-layer.
-
-It accepts:
-
-- `file`
-- `model`
-- `language`
-- `preset`
-- `num_speakers`
-- `max_speakers`
-- `response_format`
-- `include_words`
-- `include_artifacts`
-
-Use this route if you want the full native response shape directly:
-
-- `speakers`
-- `segments`
-- `words`
-- `artifacts`
-- `usage`
-- native metadata such as `capability`, `mode`, and model breakdown
-
 ## True streaming transcription
 
 `WS /v1/audio/transcriptions/stream` is the persistent live-audio route.
@@ -257,19 +226,7 @@ No host Python is required for Docker build/run.
 # 2. Run the runner. The first real request may download NeMo model weights.
 docker compose -f infra/compose/docker-compose.audio-diarized-transcription-runner.yml up
 
-# 3. Transcribe and diarize an audio file.
-curl -s http://localhost:8080/v1/audio/diarized-transcriptions \
-  -F file=@./sample.wav \
-  -F model=nemo-diarized-transcription-meeting-v0 \
-  -F language=en \
-  -F preset=meeting \
-  -F max_speakers=8 \
-  -F response_format=json | jq
-```
-
-OpenAI-compatible clients can use the bounded compatibility route directly:
-
-```bash
+# 3. Transcribe and diarize an audio file through the bounded API.
 curl -s http://localhost:8080/v1/audio/transcriptions \
   -F file=@./sample.wav \
   -F model=nemo-diarized-transcription-meeting-v0 \

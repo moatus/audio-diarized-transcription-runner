@@ -19,25 +19,20 @@ The implementation target for the PoC container is
 additive docs or integration references until this runner surface is promoted
 into a broader workflow runtime.
 
-## Current Compatibility Contract
+## Current Public Transcription Contract
 
-The existing paths remain intact:
+The public transcription surface is intentionally reduced to two routes:
 
 - `POST /v1/audio/transcriptions` is the intended bounded
   OpenAI-compatible request path backed by the same native
-  `audio:diarized-transcription@v0` capability.
-- `POST /v1/audio/diarized-transcriptions` remains as the legacy/native
-  multipart request path.
+  `audio:diarized-transcription@v0` capability. Diarization, speaker labels,
+  artifacts, segment timestamps, and word timestamps are additive flags and
+  extensions on this route.
 - `/v1/audio/diarized-transcriptions/live/sessions/*` remains the additive
   REST session path using online diarization with chunk ingest and optional
   final offline transcription.
 - The true streaming path is adjacent to the bounded API:
   `WS /v1/audio/transcriptions/stream`.
-- `WS /v1/audio/diarized-transcriptions/stream` remains as a compatibility
-  alias for existing PoC clients.
-
-No existing request shape, response shape, capability id, or model default is
-removed for the current PoC.
 
 ## Architecture
 

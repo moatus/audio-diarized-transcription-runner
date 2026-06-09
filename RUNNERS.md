@@ -13,19 +13,17 @@ it to 16 kHz mono WAV, and runs NVIDIA NeMo offline diarization-with-ASR.
 | `GET` | `/healthz` | Runtime readiness and CUDA facts |
 | `GET` | `/audio:diarized-transcription@v0/options` | Capability defaults and limits |
 | `POST` | `/v1/audio/transcriptions` | Main OpenAI-compatible bounded transcription request backed by the native diarized transcription capability |
-| `POST` | `/v1/audio/diarized-transcriptions` | Legacy/native multipart diarized transcription request |
 | `POST` | `/v1/audio/diarized-transcriptions/live/sessions` | Create a stateful online diarization session |
 | `POST` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}/audio` | Ingest one audio chunk into a live session |
 | `GET` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}` | Read the latest live diarization snapshot |
 | `POST` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}/finish` | Close a live session, optionally running final offline ASR+diarization |
 | `DELETE` | `/v1/audio/diarized-transcriptions/live/sessions/{session_id}` | Close a live session without final transcription |
 | `WS` | `/v1/audio/transcriptions/stream` | True streaming PCM16 ASR+diarization over one persistent transport |
-| `WS` | `/v1/audio/diarized-transcriptions/stream` | Legacy compatibility alias for the true streaming route |
 | `GET` | `/metrics` | Prometheus text metrics when `METRICS_ENABLED=true` |
 
 ### Request
 
-`POST /v1/audio/diarized-transcriptions` requires multipart form data:
+`POST /v1/audio/transcriptions` requires multipart form data:
 
 | Field | Required | Default | Notes |
 |---|---:|---|---|
@@ -35,9 +33,11 @@ it to 16 kHz mono WAV, and runs NVIDIA NeMo offline diarization-with-ASR.
 | `preset` | no | `meeting` | Only the meeting preset is supported in this phase. |
 | `num_speakers` | no |  | Exact speaker count, if known. |
 | `max_speakers` | no | `8` | Upper bound for clustering. |
-| `response_format` | no | `json` | `json`, `text`, `srt`, or `vtt`. |
-| `include_words` | no | `true` | Include normalized word timestamps in JSON. |
-| `include_artifacts` | no | `true` | Include local artifact paths in JSON. |
+| `response_format` | no | `json` | `json`, `verbose_json`, `text`, `srt`, or `vtt`. |
+| `timestamp_granularities[]` | no | `segment` | `segment`, `word`, or both; also accepts comma-separated `timestamp_granularities`. |
+| `diarization` / `include_diarization` | no | `false` | Include speaker labels and the generic top-level diarization extension in `verbose_json`. |
+| `include_words` | no | `false` | Include normalized word timestamps in verbose JSON. |
+| `include_artifacts` | no | `false` | Include local artifact paths in verbose JSON. |
 
 Unsupported language, preset, or response format returns a structured `422`.
 Oversized uploads return `413`. A full local queue returns `429`. CUDA OOM
@@ -133,8 +133,7 @@ fields:
 - `artifacts`
 - `speaker` on emitted segment and word entries
 
-The standard route remains the best contract for native Livepeer integrations
-that need the full diarization response shape.
+The bounded route remains the only public file/request transcription contract.
 
 ### Live Session Path
 

@@ -1,11 +1,10 @@
 capability: audio:diarized-transcription@v0
 description: |
   Audio diarized transcription runner. Accepts multipart audio upload,
-  normalizes the input to 16 kHz mono WAV, runs NVIDIA NeMo offline
-  diarization-with-ASR, and returns speaker-labeled text, speaker segments,
-  optional word timestamps, subtitle artifacts, and usage. Also exposes an
-  additive OpenAI-compatible bounded transcription route backed by the same
-  native Livepeer capability, and an adjacent true-streaming WebSocket route.
+  normalizes the input to 16 kHz mono WAV, runs NVIDIA NeMo diarization-with-ASR
+  for bounded requests, and returns text, timestamps, optional speaker labels,
+  subtitle artifacts, and usage. Also exposes an OpenAI-compatible bounded
+  transcription route and an adjacent true-streaming WebSocket route.
 
 offerings:
   - name: diarized-audio-transcription
@@ -13,8 +12,6 @@ offerings:
     methods:
       - POST /v1/audio/transcriptions
       - WS /v1/audio/transcriptions/stream
-      - POST /v1/audio/diarized-transcriptions
-      - WS /v1/audio/diarized-transcriptions/stream
       - GET /audio:diarized-transcription@v0/options
     input: audio
     rate_card_hints:

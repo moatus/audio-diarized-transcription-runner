@@ -9,7 +9,7 @@ FROM ${BASE_IMAGE}
 LABEL org.opencontainers.image.source="https://github.com/moatus/audio-diarized-transcription-runner"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.title="audio-diarized-transcription-runner"
-LABEL org.opencontainers.image.description="Livepeer audio diarized transcription runner with bounded OpenAI-compatible transcription, native diarized transcription, and adjacent true streaming"
+LABEL org.opencontainers.image.description="Livepeer audio diarized transcription runner with bounded OpenAI-compatible transcription and adjacent true streaming"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
