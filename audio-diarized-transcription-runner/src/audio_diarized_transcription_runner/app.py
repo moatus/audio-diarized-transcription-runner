@@ -125,17 +125,15 @@ def healthz() -> JSONResponse:
 def options() -> dict:
     return {
         "capability": settings.capability_name,
-        "modes": ["openai-audio-transcriptions@v1", "local-direct", "http-multipart@v0"],
+        "modes": ["openai-audio-transcriptions@v1", "local-direct"],
         "live_modes": ["sessioned-online-diarization@v0"],
         "streaming_modes": ["websocket-pcm16-true-streaming@v0"],
         "endpoints": {
             "bounded_transcriptions": "POST /v1/audio/transcriptions",
             "openai_compatible": "POST /v1/audio/transcriptions",
-            "native": "POST /v1/audio/diarized-transcriptions",
             "options": "GET /audio:diarized-transcription@v0/options",
             "live_sessions": "POST /v1/audio/diarized-transcriptions/live/sessions",
             "true_streaming": "WS /v1/audio/transcriptions/stream",
-            "legacy_true_streaming": "WS /v1/audio/diarized-transcriptions/stream",
         },
         "models": [settings.default_model],
         "languages": ["en"],
@@ -194,7 +192,6 @@ def options() -> dict:
         },
         "true_streaming": {
             "endpoint": "WS /v1/audio/transcriptions/stream",
-            "legacy_endpoint": "WS /v1/audio/diarized-transcriptions/stream",
             "transport": "persistent WebSocket",
             "input_audio": "binary frames containing little-endian 16 kHz mono int16 PCM",
             "control_messages": [
@@ -260,7 +257,6 @@ def metrics_endpoint() -> Response:
 
 
 @app.websocket("/v1/audio/transcriptions/stream")
-@app.websocket("/v1/audio/diarized-transcriptions/stream")
 async def true_streaming_websocket(websocket: WebSocket) -> None:
     await websocket.accept()
     if startup_error:
@@ -312,81 +308,6 @@ async def true_streaming_websocket(websocket: WebSocket) -> None:
                 pass
             finally:
                 await run_in_threadpool(true_streaming_sessions.release_session, session)
-
-
-@app.post("/v1/audio/diarized-transcriptions")
-async def diarized_transcriptions(
-    file: UploadFile = File(...),
-    model: str = Form(settings.default_model),
-    language: str = Form("en"),
-    preset: str = Form(settings.default_preset),
-    num_speakers: Optional[int] = Form(None),
-    max_speakers: int = Form(settings.default_max_speakers),
-    response_format: str = Form("json"),
-    include_words: bool = Form(True),
-    include_artifacts: bool = Form(True),
-) -> Response:
-    if startup_error:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": {"message": startup_error, "type": "server_error"}},
-        )
-
-    acquired = await _try_acquire_slot()
-    if not acquired:
-        raise HTTPException(
-            status_code=429,
-            detail={"error": {"message": "runner queue full", "type": "queue_full"}},
-        )
-
-    uploaded_path: Optional[Path] = None
-    try:
-        uploaded_path = await _persist_upload(file)
-        request = DiarizationRequest(
-            audio_path=uploaded_path,
-            filename=file.filename or "audio",
-            content_type=file.content_type,
-            model=model,
-            language=language,
-            preset=preset,
-            num_speakers=num_speakers,
-            max_speakers=max_speakers,
-            response_format=response_format,
-            include_words=include_words,
-            include_artifacts=include_artifacts,
-        )
-        started = time.monotonic()
-        result = await run_in_threadpool(run_diarized_transcription, request, settings)
-        elapsed = time.monotonic() - started
-        work_units = int(result["usage"]["work_units"])
-        _record_success(result["duration_seconds"], work_units)
-        headers = {
-            "X-Livepeer-Work-Units": str(work_units),
-            "X-Livepeer-Runner-Elapsed-Seconds": f"{elapsed:.3f}",
-        }
-        if response_format == "text":
-            return PlainTextResponse(result["text"], headers=headers)
-        if response_format in {"srt", "vtt"}:
-            artifact_key = f"{response_format}_path"
-            path = Path(result["artifacts"].get(artifact_key, ""))
-            return PlainTextResponse(path.read_text(encoding="utf-8"), headers=headers)
-        return JSONResponse(result, headers=headers)
-    except CudaOutOfMemoryError as error:
-        _record_failure()
-        return _error_response(str(error), 507, "cuda_out_of_memory")
-    except UnsupportedParameterError as error:
-        _record_failure()
-        return _error_response(str(error), error.status_code, error.error_type)
-    except RunnerInputError as error:
-        _record_failure()
-        return _error_response(str(error), error.status_code, error.error_type)
-    except Exception as error:
-        _record_failure()
-        return _error_response(str(error), 500, "server_error")
-    finally:
-        await _release_slot()
-        if uploaded_path and uploaded_path.exists():
-            uploaded_path.unlink(missing_ok=True)
 
 
 @app.post("/v1/audio/transcriptions")

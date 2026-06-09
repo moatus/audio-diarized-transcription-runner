@@ -342,29 +342,14 @@ def test_true_streaming_websocket_keeps_one_transport_and_emits_before_finish(mo
             assert finished["event_type"] == "transcript.session.finished"
 
 
-def test_true_streaming_legacy_websocket_route_remains_compatible(monkeypatch, tmp_path):
-    settings = RunnerSettings(work_dir=tmp_path, true_streaming_engine="fake", device="cpu")
-    monkeypatch.setattr(app_module, "settings", settings)
-    monkeypatch.setattr(
-        app_module,
-        "true_streaming_sessions",
-        TrueStreamingSessionManager(settings=settings, engine_factory=_fake_engines),
-    )
-    monkeypatch.setattr(
-        app_module,
-        "assert_runtime_ready",
-        lambda _settings: {"cuda_available": False, "torch_version": None},
-    )
-
-    with TestClient(app_module.app) as client:
-        with client.websocket_connect(
-            "/v1/audio/diarized-transcriptions/stream?session_id=ws_legacy"
-        ) as websocket:
-            started = websocket.receive_json()
-            assert started["event_type"] == "session.snapshot"
-            websocket.send_json({"type": "finish"})
-            finished = websocket.receive_json()
-            assert finished["event_type"] == "transcript.session.finished"
+def test_removed_legacy_websocket_route_is_not_registered():
+    websocket_paths = {
+        route.path
+        for route in app_module.app.routes
+        if "websocket" in route.__class__.__name__.lower()
+    }
+    assert "/v1/audio/transcriptions/stream" in websocket_paths
+    assert "/v1/audio/diarized-transcriptions/stream" not in websocket_paths
 
 
 def test_true_streaming_websocket_rejects_duplicate_active_session_id(monkeypatch, tmp_path):

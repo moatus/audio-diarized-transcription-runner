@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from audio_diarized_transcription_runner import app as app_module
 
 
-def test_options_advertises_native_and_openai_compatible_routes():
+def test_options_advertises_two_public_transcription_routes():
     with TestClient(app_module.app) as client:
         response = client.get("/audio:diarized-transcription@v0/options")
 
@@ -11,13 +11,10 @@ def test_options_advertises_native_and_openai_compatible_routes():
     body = response.json()
     assert body["capability"] == "audio:diarized-transcription@v0"
     assert body["endpoints"]["bounded_transcriptions"] == "POST /v1/audio/transcriptions"
-    assert body["endpoints"]["native"] == "POST /v1/audio/diarized-transcriptions"
     assert body["endpoints"]["openai_compatible"] == "POST /v1/audio/transcriptions"
     assert body["endpoints"]["true_streaming"] == "WS /v1/audio/transcriptions/stream"
-    assert (
-        body["endpoints"]["legacy_true_streaming"]
-        == "WS /v1/audio/diarized-transcriptions/stream"
-    )
+    assert "native" not in body["endpoints"]
+    assert "legacy_true_streaming" not in body["endpoints"]
     assert body["openai_compatible"] == {
         "endpoint": "POST /v1/audio/transcriptions",
         "native_capability": "audio:diarized-transcription@v0",
@@ -35,7 +32,14 @@ def test_options_advertises_native_and_openai_compatible_routes():
         ],
     }
     assert body["true_streaming"]["endpoint"] == "WS /v1/audio/transcriptions/stream"
-    assert (
-        body["true_streaming"]["legacy_endpoint"]
-        == "WS /v1/audio/diarized-transcriptions/stream"
-    )
+    assert "legacy_endpoint" not in body["true_streaming"]
+
+
+def test_removed_bounded_native_route_is_not_registered():
+    http_paths = {
+        route.path
+        for route in app_module.app.routes
+        if "route" in route.__class__.__name__.lower()
+    }
+    assert "/v1/audio/transcriptions" in http_paths
+    assert "/v1/audio/diarized-transcriptions" not in http_paths
